@@ -123,6 +123,7 @@ mod tests {
     fn many_languages() {
         let h = Highlighter::new();
         let n = h.language_names().len();
+        println!("languages: {n}");
         assert!(n >= 100, "only {n} languages");
         for want in ["C", "C++", "Go", "Rust", "Lua", "TOML", "Nim", "Zig", "Lisp", "Haskell"] {
             assert!(h.index_of(want).is_some() || h.language_names().iter().any(|x| x.starts_with(want)), "missing {want}");

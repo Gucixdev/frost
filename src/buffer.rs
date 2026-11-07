@@ -620,4 +620,57 @@ mod tests {
         x.indent(true);
         assert_eq!(x.contents(), "a\nb");
     }
+
+    #[test]
+    fn delete_lines_two_cursors() {
+        let mut x = b("a\nb\nc\nd");
+        x.cursors = vec![Cursor::at(0), Cursor::at(4)];
+        x.delete_lines();
+        assert_eq!(x.contents(), "b\nd");
+        x.undo();
+        assert_eq!(x.contents(), "a\nb\nc\nd");
+    }
+
+    #[test]
+    fn delete_last_line_and_empty() {
+        let mut x = b("only");
+        x.delete_lines();
+        assert_eq!(x.contents(), "");
+        x.backspace(); x.delete(); x.delete_lines();
+        assert_eq!(x.contents(), "");
+        x.move_cursors(Move::Up, false); x.move_cursors(Move::Down, true); x.move_cursors(Move::PageDown(5), false);
+    }
+
+    #[test]
+    fn paste_one_line_per_cursor_and_undo() {
+        let mut x = b("1\n2");
+        x.cursors = vec![Cursor::at(1), Cursor::at(3)];
+        x.paste("a\nb");
+        assert_eq!(x.contents(), "1a\n2b");
+        x.undo();
+        assert_eq!(x.contents(), "1\n2");
+    }
+
+    #[test]
+    fn selection_replace_and_unicode() {
+        let mut x = b("zażółć gęślą");
+        x.cursors = vec![Cursor { head: 6, anchor: 0, want: None }];
+        x.insert("X");
+        assert_eq!(x.contents(), "X gęślą");
+        x.cursors = vec![Cursor::at(x.len())];
+        x.backspace();
+        assert_eq!(x.contents(), "X gęśl");
+    }
+
+    #[test]
+    fn duplicate_with_two_cursors_and_newline_indent() {
+        let mut x = b("  a\nb");
+        x.cursors = vec![Cursor::at(3)];
+        x.newline();
+        assert_eq!(x.contents(), "  a\n  \nb");
+        let mut y = b("a\nb");
+        y.cursors = vec![Cursor::at(0), Cursor::at(2)];
+        y.duplicate_lines();
+        assert_eq!(y.contents(), "a\na\nb\nb");
+    }
 }

@@ -11,7 +11,7 @@ CUA clipboard, mouse, multi-cursor, and Notepad++-style sessions. About 2000 lin
 - **Mouse:** click, drag, double-click word, triple-click line, wheel, tabs, menus, Alt/Ctrl-click adds a cursor.
 - **Multi-cursor:** Ctrl-D selects the word, then the next occurrence each press; Alt-Up/Down adds a cursor on the line above/below; every edit, paste (one clipboard line per cursor) and delete works at all cursors; Esc goes back to one.
 - **Sessions:** open tabs, cursor, scroll, language *and unsaved or untitled text* are saved on quit (and every 30 s) and restored on the next start. File > Save session as... / Load session... keep named ones.
-- **Languages:** ~190 syntaxes (two-face's bat set), picked by extension, file name or shebang; Ctrl-L chooses one by hand.
+- **Languages:** 199 syntaxes (two-face's bat set), picked by extension, file name or shebang; Ctrl-L chooses one by hand.
 - Undo is a snapshot of the rope (O(1) clone), typing is grouped. Line endings (LF/CRLF) are kept.
 
 State lives in `$XDG_STATE_HOME/frost` (default `~/.local/state/frost`).
