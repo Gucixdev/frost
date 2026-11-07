@@ -932,6 +932,22 @@ impl Buffer {
 #[cfg(test)]
 mod history_tests {
     use super::*;
+
+    /// every case was produced by the Lean model in lean4/Frost.lean (whose `apply_delta` theorem is proved)
+    #[test]
+    fn delta_matches_the_lean_model_on_every_case() {
+        let cases = include_str!("../tests/delta_cases.tsv");
+        let mut n = 0;
+        for line in cases.lines() {
+            let f: Vec<&str> = line.split('\t').collect();
+            assert_eq!(f.len(), 5, "bad line {line:?}");
+            let d = delta(f[0], f[1]);
+            assert_eq!((d.start, d.del, d.ins.as_str()), (f[2].parse().unwrap(), f[3].parse().unwrap(), f[4]), "{:?} -> {:?}", f[0], f[1]);
+            n += 1;
+        }
+        assert_eq!(n, 121 * 121);
+    }
+
     #[test]
     fn delta_roundtrip_with_unicode() {
         for (a, b) in [("abc", "abXc"), ("żółw", "żołw"), ("", "x"), ("x", ""), ("same", "same"), ("aXXb", "ab")] {

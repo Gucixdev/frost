@@ -1,0 +1,16 @@
+#!/usr/bin/env bash
+# Everything that must hold: the Lean proofs, the Lean oracle against the Rust code, the Rust tests.
+set -eu
+cd "$(dirname "$0")"
+export PATH="$HOME/.elan/bin:$PATH"
+if command -v lean >/dev/null 2>&1; then
+  echo "== lean: proofs"
+  (cd lean4 && lean Frost.lean | tee /dev/stderr | grep -q "depends on axioms: \[propext, Quot.sound\]")
+  echo "== lean: oracle cases are current"
+  (cd lean4 && lean --run Frost.lean | sed 1d) | cmp - tests/delta_cases.tsv
+else
+  echo "== lean not installed: skipping the proofs (the saved oracle cases are still checked by cargo test)"
+fi
+echo "== cargo test"
+cargo test --release --quiet
+echo "all good"
