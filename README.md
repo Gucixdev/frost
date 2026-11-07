@@ -3,8 +3,10 @@
 A small terminal text editor in Rust. Layout like [Fresh](https://github.com/sinelaw/fresh) (menu bar, tabs, gutter, status bar, command palette), keys like micro,
 CUA clipboard, mouse, multi-cursor, and Notepad++-style sessions. About 2000 lines, 4 real dependencies.
 
-    ./run                 # builds (release) and starts; or: cargo build --release
-    frost [FILE...]       # no files: reopen the last session
+    make && sudo make install     # or: ./run  (builds and starts)
+    frost                         # reopen the last session
+    frost FILE[:LINE]...          # editor call (git, nnn, $EDITOR): only these files, saved session untouched
+    export EDITOR=frost VISUAL=frost
 
 ## What it has
 - **Keys (CUA + micro):** Ctrl-S/O/N/W/Q, Ctrl-Z/Y, Ctrl-X/C/V (system clipboard), Ctrl-A, Ctrl-F (live search) F3/Shift-F3, Ctrl-H replace all, Ctrl-G line, Ctrl-K delete line, Ctrl-Shift-D duplicate, Tab/Shift-Tab indent, Ctrl-P command palette, F1 keys, F10 menu.
@@ -21,14 +23,14 @@ CUA clipboard, mouse, multi-cursor, and Notepad++-style sessions. About 2000 lin
 
 ## Config (Lua)
 ```lua
-frost.theme = "gruvbox"            -- dark (default), light, gruvbox, mono
+frost.theme = "terminal"          -- terminal (default: your terminal's own colours), dark, light, gruvbox, mono
 frost.colors.accent = "#ff8800"    -- bg bar dim fg accent sel cursor2
 frost.line_numbers = true
 frost.tab_width = 4
 frost.dictionary = "/path/to/words.tsv"
 frost.keys["ctrl-j"] = "goto"      -- key spec -> action name (save, quit, undo, find, define, difftab, ...)
 ```
-A broken file shows its error in the status line and the defaults are used. Syntax colours come from the bundled bat themes.
+A broken file shows its error in the status line and the defaults are used. In the default `terminal` theme everything, syntax colours included, uses the terminal's palette (ANSI), so frost matches your terminal theme.
 
 ## Platforms
 Linux is what it is developed and tested on. The code has no Linux-only parts: clipboard tries wl-copy, xclip, xsel, pbcopy, clip.exe and PowerShell; state and config go to XDG, `~/Library/Application Support` or `%APPDATA%`; big files are read with `read_at`/`seek_read`. macOS, Windows and the BSDs are **not tested yet**.

@@ -100,6 +100,8 @@ pub struct App {
     pub dict: crate::dict::Dict,
     /// word suggestions under the caret: (word, meaning) list, selected row, chars already typed
     pub suggest: Option<(Vec<(String, String)>, usize, usize)>,
+    /// false when started with file arguments: the saved session is not touched
+    pub persist: bool,
 }
 
 /// (program, args) pairs tried in order: Wayland, X11, macOS, Windows
@@ -132,18 +134,26 @@ fn get_system_clipboard() -> Option<String> {
 
 impl App {
     pub fn new(files: &[String]) -> App {
+        let cfg = crate::config::load();   // first: the theme decides which syntax colours the highlighter uses
         let hl = Highlighter::new();
         let mut app = App { tabs: vec![], active: 0, hl, prompt: None, picker: None, menu: None, msg: String::new(), quit: false, line_numbers: true,
                             layout: Layout::default(), show_help: false, last_find: String::new(), clip: String::new(), dragging: false,
-                            clicks: (Instant::now(), 0, 0, 0), confirm_quit: false, session_dir: session::session_dir(), hl_key: (0, 0), closed: vec![], hover_row: None, keymap: Default::default(), dict: crate::dict::Dict::load(None), suggest: None };
-        let cfg = crate::config::load();
+                            clicks: (Instant::now(), 0, 0, 0), confirm_quit: false, session_dir: session::session_dir(), hl_key: (0, 0), closed: vec![], hover_row: None, keymap: Default::default(), dict: crate::dict::Dict::load(None), suggest: None, persist: true };
         app.line_numbers = cfg.line_numbers;
         app.keymap = cfg.keys.iter().filter_map(|(k, v)| action_by_name(v).map(|a| (k.clone(), a))).collect();
         if cfg.dictionary.is_some() { app.dict = crate::dict::Dict::load(cfg.dictionary.clone()); }
         if let Some(e) = cfg.error { app.msg = e; }
-        // like Notepad++: the previous session always comes back, files named on the command line are added to it
-        app.restore(&session::load());
-        for f in files { app.open_path(PathBuf::from(f)); }
+        // `frost` alone brings the last session back (Notepad++ style). `frost FILE...` is an editor call (git, nnn, $EDITOR):
+        // it opens just those files and leaves the saved session alone. `file:12` and `+12 file` jump to a line.
+        app.persist = files.is_empty();
+        if app.persist { app.restore(&session::load()); }
+        let mut line = 0usize;
+        for f in files {
+            if let Some(n) = f.strip_prefix('+').and_then(|n| n.parse::<usize>().ok()) { line = n; continue; }
+            let (path, l2) = match f.rsplit_once(':') { Some((p, n)) if n.parse::<usize>().is_ok() && !std::path::Path::new(f).exists() => (p, n.parse().unwrap_or(0)), _ => (f.as_str(), 0) };
+            self_open(&mut app, path, if l2 > 0 { l2 } else { line });
+            line = 0;
+        }
         if app.tabs.is_empty() { app.new_tab(); }
         app
     }
@@ -231,6 +241,7 @@ impl App {
 
     /// `full` also writes the undo history (on exit); the 30 s autosave leaves it out because computing it costs time
     pub fn save_session(&mut self, full: bool) {
+        if !self.persist { return; }
         let s = self.snapshot(full);
         if let Err(e) = session::save(&s) { eprintln!("frost: cannot save session: {e}"); }
     }
@@ -702,4 +713,9 @@ mod key_tests {
         assert_eq!(action_by_name("save"), Some(Action::Save));
         assert_eq!(action_by_name("nope"), None);
     }
+}
+
+fn self_open(app: &mut App, path: &str, line: usize) {
+    app.open_path(PathBuf::from(path));
+    if line > 0 { app.buf().goto_line(line); }
 }

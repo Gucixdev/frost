@@ -1,0 +1,40 @@
+.TH FROST 1 "2026" "frost" "User Commands"
+.SH NAME
+frost \- small terminal text editor
+.SH SYNOPSIS
+.B frost
+[\fB+\fILINE\fR] [\fIFILE\fR[\fB:\fILINE\fR]]...
+.SH DESCRIPTION
+A small editor for the terminal: menu bar and tabs like Fresh, keys like micro (CUA clipboard, mouse, multiple cursors).
+It uses the colours of your terminal. It opens files of several gigabytes at once and keeps an unlimited undo history.
+.PP
+Without arguments frost restores the previous session: open tabs, cursors, unsaved and untitled text, closed tabs and undo history.
+With file arguments it opens only those files and leaves the saved session alone, so it is safe as $EDITOR and $VISUAL (git, nnn, crontab).
+.SH KEYS
+.TP
+Ctrl-S, Ctrl-Q, Ctrl-O, Ctrl-N, Ctrl-W
+save, quit, open, new, close tab
+.TP
+Ctrl-Z, Ctrl-Y, Ctrl-X, Ctrl-C, Ctrl-V
+undo, redo, cut, copy, paste
+.TP
+Ctrl-F, F3, Ctrl-H, Ctrl-G
+find, find next, replace all, go to line
+.TP
+Ctrl-D, Alt-Up, Alt-Down
+next occurrence as a new cursor, cursor above, cursor below
+.TP
+Ctrl-T, Ctrl-L, Ctrl-P, F2, F1, F10
+reopen closed tab, language, command palette, define word, keys, menu
+.SH FILES
+.TP
+~/.config/frost/init.lua
+configuration in Lua (theme, options, key bindings)
+.TP
+~/.config/frost/dictionary.txt
+extra dictionary entries, one per line: word, TAB, meaning
+.TP
+~/.local/state/frost/
+session and history
+.SH SEE ALSO
+https://github.com/Gucixdev/frost

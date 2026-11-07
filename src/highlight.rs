@@ -20,7 +20,7 @@ pub struct Highlighter {
 impl Highlighter {
     pub fn new() -> Self {
         let ss = two_face::syntax::extra_newlines();
-        let theme = two_face::theme::extra().get(EmbeddedThemeName::Base16OceanDark).clone();
+        let theme = two_face::theme::extra().get(if crate::config::theme().terminal { EmbeddedThemeName::Ansi } else { EmbeddedThemeName::Base16OceanDark }).clone();
         let names = ss.syntaxes().iter().map(|s| s.name.clone()).collect();
         Highlighter { ss, theme, names, cache_syntax: usize::MAX, checks: vec![] }
     }
@@ -68,7 +68,9 @@ impl Highlighter {
     }
 
     fn style(s: syntect::highlighting::Style) -> Style {
-        let mut st = Style::default().fg(Color::Rgb(s.foreground.r, s.foreground.g, s.foreground.b));
+        // the Ansi theme encodes terminal colours: alpha 0 = palette index in r, alpha 1 = the terminal's default
+        let fg = match s.foreground.a { 0 => Color::Indexed(s.foreground.r), 1 => Color::Reset, _ => Color::Rgb(s.foreground.r, s.foreground.g, s.foreground.b) };
+        let mut st = Style::default().fg(fg);
         if s.font_style.contains(syntect::highlighting::FontStyle::BOLD) { st = st.add_modifier(Modifier::BOLD); }
         if s.font_style.contains(syntect::highlighting::FontStyle::ITALIC) { st = st.add_modifier(Modifier::ITALIC); }
         if s.font_style.contains(syntect::highlighting::FontStyle::UNDERLINE) { st = st.add_modifier(Modifier::UNDERLINED); }
