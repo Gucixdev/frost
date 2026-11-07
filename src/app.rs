@@ -57,7 +57,10 @@ pub struct Picker { pub kind: PickerKind, pub filter: String, pub items: Vec<Str
 impl Picker {
     pub fn shown(&self) -> Vec<usize> {
         let f = self.filter.to_lowercase();
-        (0..self.items.len()).filter(|&i| f.split_whitespace().all(|w| self.items[i].to_lowercase().contains(w))).collect()
+        let mut v: Vec<usize> = (0..self.items.len()).filter(|&i| f.split_whitespace().all(|w| self.items[i].to_lowercase().contains(w))).collect();
+        // names that start with the typed text come first, the rest keep their (alphabetical) order
+        if !f.is_empty() && self.kind == PickerKind::Language { v.sort_by_key(|&i| !self.items[i].to_lowercase().starts_with(&f)); }
+        v
     }
 }
 
@@ -264,7 +267,7 @@ impl App {
             Action::CursorUp => self.buf().add_cursor_vertical(false),
             Action::CursorDown => self.buf().add_cursor_vertical(true),
             Action::OneCursor => self.buf().collapse(),
-            Action::Language => self.picker = Some(Picker { kind: PickerKind::Language, filter: String::new(), items: self.hl.language_names(), sel: 0 }),
+            Action::Language => self.picker = Some(Picker { kind: PickerKind::Language, filter: String::new(), items: { let mut n = self.hl.language_names(); n.sort_by_key(|s| s.to_lowercase()); n.dedup(); n }, sel: 0 }),
             Action::Palette => self.picker = Some(Picker { kind: PickerKind::Palette, filter: String::new(), items: PALETTE.iter().map(|p| p.0.to_string()).collect(), sel: 0 }),
             Action::SaveSession => self.prompt = Some(Prompt { kind: PromptKind::SaveSession, label: "Save session as:".into(), input: String::new(), aux: String::new() }),
             Action::LoadSession => {

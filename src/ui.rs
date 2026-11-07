@@ -212,7 +212,11 @@ fn picker(f: &mut Frame, app: &mut App, area: Rect) {
     let mut lines = vec![Line::from(vec![Span::styled("> ", Style::default().fg(ACCENT)), Span::raw(pk.filter.clone())])];
     for (n, &i) in shown.iter().enumerate().skip(first).take(rows) {
         let st = if n == pk.sel { Style::default().bg(ACCENT).fg(BG) } else { Style::default() };
-        lines.push(Line::styled(format!(" {}", pk.items[i]), st));
+        // Language list is alphabetical: show the initial letter in a margin where a new letter starts
+        let lang = matches!(pk.kind, crate::app::PickerKind::Language) && pk.filter.is_empty();
+        let ini = |s: &str| s.chars().next().map(|c| c.to_ascii_uppercase()).unwrap_or(' ');
+        let mark = if lang && (n == 0 || ini(&pk.items[shown[n - 1]]) != ini(&pk.items[i])) { ini(&pk.items[i]) } else { ' ' };
+        lines.push(Line::styled(format!(" {} {}", mark, pk.items[i]), st));
     }
     f.render_widget(Paragraph::new(lines), inner);
     f.set_cursor_position((inner.x + 2 + pk.filter.chars().count() as u16, inner.y));
