@@ -1,0 +1,6 @@
+#!/usr/bin/env bash
+# run - build frost (release) if needed and start it; no files = reopen the last session. 0 arguments.
+set -eu
+cd "$(dirname "$(readlink -f "$0")")"
+cargo build --release --quiet
+exec ./target/release/frost

@@ -3,7 +3,7 @@
 A small terminal text editor in Rust. Layout like [Fresh](https://github.com/sinelaw/fresh) (menu bar, tabs, gutter, status bar, command palette), keys like micro,
 CUA clipboard, mouse, multi-cursor, and Notepad++-style sessions. About 2000 lines, 4 real dependencies.
 
-    cargo build --release
+    ./run                 # builds (release) and starts; or: cargo build --release
     frost [FILE...]       # no files: reopen the last session
 
 ## What it has
