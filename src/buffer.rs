@@ -60,7 +60,15 @@ impl Buffer {
 
     pub fn open(path: &std::path::Path) -> std::io::Result<Self> {
         let bytes = std::fs::read(path)?;
-        Ok(Buffer::from_text(&String::from_utf8_lossy(&bytes), Some(path.to_path_buf())))
+        match std::str::from_utf8(&bytes) {
+            Ok(s) if s.len() > PAR_MIN => {
+                let (text, crlf) = parse_parallel(s);
+                let mut b = Buffer::new();
+                b.text = text; b.crlf = crlf; b.path = Some(path.to_path_buf());
+                Ok(b)
+            }
+            _ => Ok(Buffer::from_text(&String::from_utf8_lossy(&bytes), Some(path.to_path_buf()))),
+        }
     }
 
     pub fn save(&mut self) -> std::io::Result<()> {
@@ -672,5 +680,46 @@ mod tests {
         y.cursors = vec![Cursor::at(0), Cursor::at(2)];
         y.duplicate_lines();
         assert_eq!(y.contents(), "a\na\nb\nb");
+    }
+}
+
+/// above this size a file is split at line ends and the pieces are turned into ropes on all cores
+const PAR_MIN: usize = 4 << 20;
+
+fn parse_parallel(s: &str) -> (Rope, bool) {
+    let n = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(4).min(16);
+    let bytes = s.as_bytes();
+    let mut cuts = vec![0usize];
+    for k in 1..n {
+        let mut p = (bytes.len() * k / n).max(*cuts.last().unwrap());
+        while p < bytes.len() && bytes[p - 1] != b'\n' { p += 1; }   // '\n' is ASCII, so this is always a char boundary
+        cuts.push(p.min(bytes.len()));
+    }
+    cuts.push(bytes.len());
+    let parts: Vec<(Rope, bool)> = std::thread::scope(|sc| {
+        let hs: Vec<_> = cuts.windows(2).map(|w| {
+            let piece = &s[w[0]..w[1]];
+            sc.spawn(move || {
+                if piece.contains("\r\n") { (Rope::from_str(&piece.replace("\r\n", "\n")), true) } else { (Rope::from_str(piece), false) }
+            })
+        }).collect();
+        hs.into_iter().map(|h| h.join().unwrap()).collect()
+    });
+    let mut rope = Rope::new();
+    let mut crlf = false;
+    for (r, c) in parts { rope.append(r); crlf |= c; }
+    (rope, crlf)
+}
+
+#[cfg(test)]
+mod big_tests {
+    use super::*;
+    #[test]
+    fn parallel_parse_matches_plain() {
+        let s: String = (0..400_000).map(|i| format!("line {} żółw\r\n", i)).collect();
+        assert!(s.len() > PAR_MIN);
+        let (r, crlf) = parse_parallel(&s);
+        assert!(crlf);
+        assert_eq!(r.to_string(), s.replace("\r\n", "\n"));
     }
 }

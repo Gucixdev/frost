@@ -5,6 +5,7 @@ use syntect::highlighting::{HighlightIterator, HighlightState, Highlighter as Hi
 use syntect::parsing::{ParseState, ScopeStack, SyntaxSet};
 use two_face::theme::EmbeddedThemeName;
 
+const FAR: usize = 20_000;
 const CHECK: usize = 128;
 
 pub struct Highlighter {
@@ -83,10 +84,13 @@ impl Highlighter {
         let hi = Hi::new(&self.theme);
         // walk from the nearest stored checkpoint to the window, storing new checkpoints on the way
         let k = (first / CHECK).min(self.checks.len() - 1);
-        let (mut ps, mut hs) = self.checks[k].clone();
+        // far beyond the last checkpoint (jumping to the end of a huge file): do not parse everything in between,
+        // start fresh a little above the window - multi-line constructs may be coloured wrong there, but it is instant
+        let jump = first.saturating_sub(k * CHECK) > FAR;
+        let (start, (mut ps, mut hs)) = if jump { (first.saturating_sub(100), self.fresh(syntax)) } else { (k * CHECK, self.checks[k].clone()) };
         let mut out = vec![];
-        for ln in k * CHECK..end {
-            if ln % CHECK == 0 && ln / CHECK == self.checks.len() { self.checks.push((ps.clone(), hs.clone())); }
+        for ln in start..end {
+            if !jump && ln % CHECK == 0 && ln / CHECK == self.checks.len() { self.checks.push((ps.clone(), hs.clone())); }
             let mut line = get_line(ln);
             line.push('\n');
             let ops = match ps.parse_line(&line, &self.ss) { Ok(o) => o, Err(_) => vec![] };
