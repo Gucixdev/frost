@@ -44,7 +44,10 @@ fn apply(r: &mut Rope, d: &Delta) {
 
 /// history is only kept on disk for texts up to this size and this many steps
 const HIST_MAX_CHARS: usize = 4 << 20;
-const HIST_MAX_STEPS: usize = 50_000;
+/// undo steps kept in memory before the older ones are merged
+const KEEP: usize = 3000;
+/// uncompressed budget for one tab's saved steps
+const HIST_MAX_BYTES: usize = 32 << 20;
 
 #[derive(Clone)]
 struct Snap { text: Rope, cursors: Vec<Cursor> }
@@ -71,15 +74,21 @@ pub struct Buffer {
     pub loading: Option<Loader>,
     /// shown instead of the file name (diff views)
     pub title: Option<String>,
+    /// id of this tab's history file (stable across restarts)
+    pub hid: String,
+    /// bumped whenever the undo/redo history changes
+    pub hist_gen: u64,
 }
 
 fn is_word(c: char) -> bool { c.is_alphanumeric() || c == '_' }
 
 impl Buffer {
     pub fn new() -> Self {
-        Buffer { text: Rope::new(), path: None, modified: false, crlf: false, cursors: vec![Cursor::at(0)], syntax: 0, scroll: 0, hscroll: 0,
-                 undo: vec![], redo: vec![], last_kind: "", version: 0, first_changed: usize::MAX, loading: None, title: None,
-                 id: { static N: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1); N.fetch_add(1, std::sync::atomic::Ordering::Relaxed) } }
+        let mut b = Buffer { text: Rope::new(), path: None, modified: false, crlf: false, cursors: vec![Cursor::at(0)], syntax: 0, scroll: 0, hscroll: 0,
+                 undo: vec![], redo: vec![], last_kind: "", version: 0, first_changed: usize::MAX, loading: None, title: None, hid: String::new(), hist_gen: 0,
+                 id: { static N: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1); N.fetch_add(1, std::sync::atomic::Ordering::Relaxed) } };
+        b.hid = format!("{:x}{:x}", std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_nanos()).unwrap_or(0), b.id);
+        b
     }
 
     pub fn from_text(s: &str, path: Option<PathBuf>) -> Self {
@@ -141,10 +150,12 @@ impl Buffer {
     // ---------------------------------------------------------------- undo
     fn checkpoint(&mut self, kind: &'static str) {
         self.ensure_loaded();
-        let coalesce = kind == "type" && self.last_kind == "type";
+        let coalesce = (kind == "type" || kind == "del") && self.last_kind == kind;
         if !coalesce {
             self.undo.push(Snap { text: self.text.clone(), cursors: self.cursors.clone() });
+            self.thin();
         }
+        self.hist_gen += 1;
         self.redo.clear();
         self.last_kind = kind;
     }
@@ -187,15 +198,42 @@ impl Buffer {
         out
     }
 
+    /// Keep memory and disk bounded without ever forgetting: once there are more than KEEP steps, every second one of the
+    /// older half is merged into its neighbour (the snapshot between them is dropped). Recent history stays fine-grained,
+    /// old history gets coarser, and it reaches back to the first text for ever.
+    fn thin(&mut self) {
+        if self.undo.len() <= KEEP { return; }
+        let half = self.undo.len() / 2;
+        let mut i = 0;
+        self.undo.retain(|_| { i += 1; i - 1 >= half || (i - 1) % 2 == 0 });
+    }
+
     /// The full history for the session file, or None when there is none or it is too big to be worth saving.
     pub fn history(&self) -> Option<History> {
         if self.loading.is_some() || self.undo.is_empty() && self.redo.is_empty() { return None; }
-        if self.len() > HIST_MAX_CHARS || self.undo.len() + self.redo.len() > HIST_MAX_STEPS { return None; }
+        if self.len() > HIST_MAX_CHARS { return None; }
         let mut texts: Vec<String> = self.undo.iter().map(|s| s.text.to_string()).collect();
         texts.push(self.text.to_string());
         texts.extend(self.redo.iter().rev().map(|s| s.text.to_string()));
-        let steps = texts.windows(2).map(|w| delta(&w[0], &w[1])).collect();
-        Some(History { base: texts.swap_remove(0), steps, current: self.undo.len() })
+        let mut current = self.undo.len();
+        loop {
+            let steps: Vec<Delta> = texts.windows(2).map(|w| delta(&w[0], &w[1])).collect();
+            let bytes: usize = steps.iter().map(|d| d.ins.len() + 24).sum();
+            if bytes <= HIST_MAX_BYTES || texts.len() <= 8 {
+                return Some(History { base: texts.swap_remove(0), steps, current });
+            }
+            // too big for the disk budget: merge every second step of the older half, like `thin`
+            let half = texts.len() / 2;
+            let mut i = 0;
+            let mut cur2 = 0;
+            let mut kept = Vec::with_capacity(texts.len());
+            for (k, t) in std::mem::take(&mut texts).into_iter().enumerate() {
+                if k >= half || k % 2 == 0 || k == current { if k == current { cur2 = kept.len(); } kept.push(t); }
+                i += 1;
+            }
+            let _ = i;
+            texts = kept; current = cur2;
+        }
     }
 
     /// Rebuild undo/redo from a saved history. Refuses (and changes nothing) when it does not end in the text we have now.
@@ -208,18 +246,21 @@ impl Buffer {
         if ropes[h.current] != self.text { return false; }
         let snap = |i: usize| Snap { text: ropes[i].clone(), cursors: vec![Cursor::at(ends[i].min(ropes[i].len_chars()))] };
         self.undo = (0..h.current).map(snap).collect();
+        self.hist_gen += 1;
         self.redo = (h.current + 1..ropes.len()).rev().map(snap).collect();
         true
     }
 
     pub fn break_undo(&mut self) { self.last_kind = ""; }
     pub fn undo(&mut self) {
+        self.hist_gen += 1;
         if let Some(s) = self.undo.pop() {
             self.redo.push(Snap { text: self.text.clone(), cursors: self.cursors.clone() });
             self.restore(s);
         }
     }
     pub fn redo(&mut self) {
+        self.hist_gen += 1;
         if let Some(s) = self.redo.pop() {
             self.undo.push(Snap { text: self.text.clone(), cursors: self.cursors.clone() });
             self.restore(s);
@@ -974,6 +1015,26 @@ mod history_tests {
         assert_eq!(y.contents(), "");
         y.undo();
         assert_eq!(y.contents(), "");
+    }
+    #[test]
+    fn long_history_is_thinned_but_reaches_the_start() {
+        let mut x = Buffer::from_text("", None);
+        for i in 0..(KEEP * 2) { x.insert(&format!("{} ", i % 10)); x.break_undo(); }
+        assert!(x.undo.len() <= KEEP, "memory stays bounded: {}", x.undo.len());
+        let full = x.contents();
+        for _ in 0..(KEEP + 10) { x.undo(); }
+        assert_eq!(x.contents(), "", "undo still reaches the very first text");
+        for _ in 0..(KEEP + 10) { x.redo(); }
+        assert_eq!(x.contents(), full);
+    }
+    #[test]
+    fn runs_of_backspace_are_one_undo_step() {
+        let mut x = Buffer::from_text("hello world", None);
+        x.cursors = vec![Cursor::at(11)];
+        for _ in 0..5 { x.backspace(); }
+        assert_eq!(x.contents(), "hello ");
+        x.undo();
+        assert_eq!(x.contents(), "hello world");
     }
     #[test]
     fn history_for_other_text_is_refused() {

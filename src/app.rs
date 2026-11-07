@@ -102,6 +102,8 @@ pub struct App {
     pub suggest: Option<(Vec<(String, String)>, usize, usize)>,
     /// false when started with file arguments: the saved session is not touched
     pub persist: bool,
+    /// buffer id -> history generation last written to disk
+    pub hist_written: std::collections::HashMap<u64, u64>,
 }
 
 /// (program, args) pairs tried in order: Wayland, X11, macOS, Windows
@@ -138,7 +140,7 @@ impl App {
         let hl = Highlighter::new();
         let mut app = App { tabs: vec![], active: 0, hl, prompt: None, picker: None, menu: None, msg: String::new(), quit: false, line_numbers: true,
                             layout: Layout::default(), show_help: false, last_find: String::new(), clip: String::new(), dragging: false,
-                            clicks: (Instant::now(), 0, 0, 0), confirm_quit: false, session_dir: session::session_dir(), hl_key: (0, 0), closed: vec![], hover_row: None, keymap: Default::default(), dict: crate::dict::Dict::load(None), suggest: None, persist: true };
+                            clicks: (Instant::now(), 0, 0, 0), confirm_quit: false, session_dir: session::session_dir(), hl_key: (0, 0), closed: vec![], hover_row: None, keymap: Default::default(), dict: crate::dict::Dict::load(None), suggest: None, persist: true, hist_written: Default::default() };
         app.line_numbers = cfg.line_numbers;
         app.keymap = cfg.keys.iter().filter_map(|(k, v)| action_by_name(v).map(|a| (k.clone(), a))).collect();
         if cfg.dictionary.is_some() { app.dict = crate::dict::Dict::load(cfg.dictionary.clone()); }
@@ -183,21 +185,21 @@ impl App {
     }
 
     // ---------------------------------------------------------------- sessions
-    pub fn snapshot(&mut self, with_history: bool) -> Session {
+    pub fn snapshot(&mut self) -> Session {
         let hl = &self.hl;
         Session {
             active: self.active.min(self.tabs.iter().filter(|b| b.title.is_none()).count().saturating_sub(1)),
-            tabs: self.tabs.iter().filter(|b| b.title.is_none()).map(|b| Self::tab_state(hl, b, with_history)).collect(),
+            tabs: self.tabs.iter().filter(|b| b.title.is_none()).map(|b| Self::tab_state(hl, b)).collect(),
             closed: self.closed.clone(),
         }
     }
 
-    fn tab_state(hl: &Highlighter, b: &Buffer, with_history: bool) -> TabState {
+    fn tab_state(hl: &Highlighter, b: &Buffer) -> TabState {
         let (l, c) = b.pos(b.primary().head);
         TabState { path: b.path.as_ref().map(|p| p.to_string_lossy().into_owned()),
                    unsaved: if b.modified || b.path.is_none() { Some(b.contents()) } else { None },
                    cursor_line: l, cursor_col: c, scroll: b.scroll, syntax: Some(hl.name_of(b.syntax)),
-                   history: if with_history { b.history() } else { None } }
+                   history: None, hid: b.hid.clone() }
     }
 
     fn tab_from_state(&mut self, t: &TabState) -> Option<Buffer> {
@@ -210,7 +212,9 @@ impl App {
         b.syntax = t.syntax.as_deref().and_then(|n| self.hl.index_of(n)).unwrap_or_else(|| self.hl.detect(t.path.as_deref(), &first));
         b.set_cursor_line_col(t.cursor_line, t.cursor_col);
         b.scroll = t.scroll;
-        if let Some(h) = &t.history { b.set_history(h); }
+        if crate::history_store::valid_id(&t.hid) { b.hid = t.hid.clone(); }
+        let h = crate::history_store::load(&self.session_dir, &b.hid).or_else(|| t.history.clone());
+        if let Some(h) = h { if b.set_history(&h) { self.hist_written.insert(b.id, b.hist_gen); } }
         Some(b)
     }
 
@@ -218,7 +222,8 @@ impl App {
     fn remember_closed(&mut self, i: usize) {
         let b = &self.tabs[i];
         if b.path.is_none() && b.len() == 0 { return; }
-        let st = Self::tab_state(&self.hl, b, true);
+        let st = Self::tab_state(&self.hl, b);
+        if b.len() <= 4 << 20 { if let Some(h) = b.history() { let _ = crate::history_store::save(&self.session_dir, &b.hid, &h); } }
         self.closed.retain(|c| !(c.path.is_some() && c.path == st.path));
         self.closed.push(st);
         if self.closed.len() > 30 { self.closed.remove(0); }
@@ -240,9 +245,26 @@ impl App {
     }
 
     /// `full` also writes the undo history (on exit); the 30 s autosave leaves it out because computing it costs time
+    /// Write the undo history of every tab whose history changed. The 30 s autosave does it for texts up to 256 KB (so a
+    /// power cut loses at most 30 s); the final save on exit does it for all (up to 4 MB). Histories nobody refers to are deleted.
+    fn write_histories(&mut self, full: bool) {
+        let limit = if full { 4 << 20 } else { 256 << 10 };
+        for b in &self.tabs {
+            if b.len() > limit || self.hist_written.get(&b.id) == Some(&b.hist_gen) { continue; }
+            if let Some(h) = b.history() {
+                if crate::history_store::save(&self.session_dir, &b.hid, &h).is_ok() { self.hist_written.insert(b.id, b.hist_gen); }
+            }
+        }
+        if full {
+            let keep = self.tabs.iter().map(|b| b.hid.clone()).chain(self.closed.iter().map(|c| c.hid.clone())).collect();
+            crate::history_store::prune(&self.session_dir, &keep);
+        }
+    }
+
     pub fn save_session(&mut self, full: bool) {
         if !self.persist { return; }
-        let s = self.snapshot(full);
+        self.write_histories(full);
+        let s = self.snapshot();
         if let Err(e) = session::save(&s) { eprintln!("frost: cannot save session: {e}"); }
     }
 
@@ -522,7 +544,7 @@ impl App {
             }
             PromptKind::ReplaceWith => { let n = self.buf().replace_all(&p.aux, &p.input); self.msg = format!("{n} replaced"); }
             PromptKind::SaveSession => {
-                let s = self.snapshot(true);
+                let s = self.snapshot();
                 self.msg = match session::save_named(&self.session_dir, p.input.trim(), &s) { Ok(()) => format!("session '{}' saved", p.input.trim()), Err(e) => format!("session: {e}") };
             }
         }

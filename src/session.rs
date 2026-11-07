@@ -15,6 +15,9 @@ pub struct TabState {
     /// undo/redo history (kept across restarts so there is always history)
     #[serde(default)]
     pub history: Option<crate::buffer::History>,
+    /// id of the tab's history file under <state>/history/
+    #[serde(default)]
+    pub hid: String,
 }
 
 #[derive(Serialize, Deserialize, Clone, Default, Debug, PartialEq)]
@@ -143,6 +146,7 @@ mod tests {
                 scroll: 0,
                 syntax: None,
                 history: None,
+                hid: String::new(),
             }],
             active: 0,
         };
@@ -176,6 +180,7 @@ mod tests {
                 scroll: 0,
                 syntax: None,
                 history: None,
+                hid: String::new(),
             }],
             active: 0,
         };

@@ -5,6 +5,7 @@ mod config;
 mod dict;
 mod diff;
 mod highlight;
+mod history_store;
 mod session;
 mod ui;
 
@@ -36,9 +37,15 @@ fn main() -> io::Result<()> {
     }));
     let mut term = Terminal::new(CrosstermBackend::new(out))?;
 
+    // a shutdown or a closed terminal (SIGTERM/SIGHUP) saves the session and the undo history like a normal quit
+    let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    #[cfg(unix)]
+    for sig in [signal_hook::consts::SIGTERM, signal_hook::consts::SIGHUP, signal_hook::consts::SIGINT] {
+        let _ = signal_hook::flag::register(sig, stop.clone());
+    }
     let mut last_save = std::time::Instant::now();
     let result = (|| -> io::Result<()> {
-        while !app.quit {
+        while !app.quit && !stop.load(std::sync::atomic::Ordering::Relaxed) {
             term.draw(|f| ui::draw(f, &mut app))?;
             let busy = app.tick();
             if event::poll(Duration::from_millis(if busy { 40 } else { 500 }))? {

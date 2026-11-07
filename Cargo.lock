@@ -346,11 +346,13 @@ version = "0.1.0"
 dependencies = [
  "arboard",
  "crossterm",
+ "flate2",
  "mlua",
  "ratatui",
  "ropey",
  "serde",
  "serde_json",
+ "signal-hook",
  "similar",
  "syntect",
  "two-face",
