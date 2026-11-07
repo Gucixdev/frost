@@ -14,12 +14,12 @@ pub enum Action {
     New, Open, Save, SaveAs, Close, NextTab, PrevTab, Quit,
     Undo, Redo, Cut, Copy, Paste, SelectAll, DuplicateLine, DeleteLine, Indent, Unindent,
     Find, FindNext, FindPrev, Replace, Goto, NextOccurrence, CursorUp, CursorDown, OneCursor,
-    Language, Palette, SaveSession, LoadSession, ToggleLineNumbers, Help,
+    Language, Palette, ReopenClosed, ClosedTabs, SaveSession, LoadSession, ToggleLineNumbers, Help,
 }
 
 pub const MENUS: &[(&str, &[(&str, &str, Action)])] = &[
     ("File", &[("New", "Ctrl-N", Action::New), ("Open...", "Ctrl-O", Action::Open), ("Save", "Ctrl-S", Action::Save), ("Save As...", "Ctrl-Shift-S", Action::SaveAs),
-               ("Close tab", "Ctrl-W", Action::Close), ("Save session as...", "", Action::SaveSession), ("Load session...", "", Action::LoadSession), ("Quit", "Ctrl-Q", Action::Quit)]),
+               ("Close tab", "Ctrl-W", Action::Close), ("Reopen closed tab", "Ctrl-T", Action::ReopenClosed), ("Closed tabs...", "", Action::ClosedTabs), ("Save session as...", "", Action::SaveSession), ("Load session...", "", Action::LoadSession), ("Quit", "Ctrl-Q", Action::Quit)]),
     ("Edit", &[("Undo", "Ctrl-Z", Action::Undo), ("Redo", "Ctrl-Y", Action::Redo), ("Cut", "Ctrl-X", Action::Cut), ("Copy", "Ctrl-C", Action::Copy), ("Paste", "Ctrl-V", Action::Paste),
                ("Select all", "Ctrl-A", Action::SelectAll), ("Duplicate line", "Ctrl-Shift-D", Action::DuplicateLine), ("Delete line", "Ctrl-K", Action::DeleteLine),
                ("Indent", "Tab", Action::Indent), ("Unindent", "Shift-Tab", Action::Unindent)]),
@@ -37,7 +37,7 @@ const PALETTE: &[(&str, Action)] = &[
     ("Undo", Action::Undo), ("Redo", Action::Redo), ("Select all", Action::SelectAll), ("Duplicate line", Action::DuplicateLine), ("Delete line", Action::DeleteLine),
     ("Find", Action::Find), ("Replace all", Action::Replace), ("Go to line", Action::Goto), ("Add next occurrence (multi-cursor)", Action::NextOccurrence),
     ("Add cursor above", Action::CursorUp), ("Add cursor below", Action::CursorDown), ("Single cursor", Action::OneCursor), ("Choose language", Action::Language),
-    ("Save session as", Action::SaveSession), ("Load session", Action::LoadSession), ("Toggle line numbers", Action::ToggleLineNumbers), ("Keys", Action::Help),
+    ("Reopen closed tab", Action::ReopenClosed), ("Closed tabs", Action::ClosedTabs), ("Save session as", Action::SaveSession), ("Load session", Action::LoadSession), ("Toggle line numbers", Action::ToggleLineNumbers), ("Keys", Action::Help),
 ];
 
 pub const HELP: &str = "Ctrl-S save  Ctrl-O open  Ctrl-N new  Ctrl-W close  Ctrl-Q quit | Ctrl-Z/Y undo/redo  Ctrl-X/C/V  Ctrl-A all  Ctrl-K del line | \
@@ -50,7 +50,7 @@ pub enum PromptKind { Open, SaveAs, Find, Goto, ReplaceFind, ReplaceWith, SaveSe
 pub struct Prompt { pub kind: PromptKind, pub label: String, pub input: String, pub aux: String }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub enum PickerKind { Palette, Language, Sessions }
+pub enum PickerKind { Palette, Language, Sessions, Closed }
 
 pub struct Picker { pub kind: PickerKind, pub filter: String, pub items: Vec<String>, pub sel: usize }
 
@@ -90,6 +90,8 @@ pub struct App {
     confirm_quit: bool,
     pub session_dir: PathBuf,
     pub hl_key: (u64, u64),
+    pub closed: Vec<TabState>,
+    pub hover_row: Option<usize>,
 }
 
 fn set_system_clipboard(s: &str) {
@@ -116,12 +118,10 @@ impl App {
         let hl = Highlighter::new();
         let mut app = App { tabs: vec![], active: 0, hl, prompt: None, picker: None, menu: None, msg: String::new(), quit: false, line_numbers: true,
                             layout: Layout::default(), show_help: false, last_find: String::new(), clip: String::new(), dragging: false,
-                            clicks: (Instant::now(), 0, 0, 0), confirm_quit: false, session_dir: session::session_dir(), hl_key: (0, 0) };
-        if files.is_empty() {
-            app.restore(&session::load());
-        } else {
-            for f in files { app.open_path(PathBuf::from(f)); }
-        }
+                            clicks: (Instant::now(), 0, 0, 0), confirm_quit: false, session_dir: session::session_dir(), hl_key: (0, 0), closed: vec![], hover_row: None };
+        // like Notepad++: the previous session always comes back, files named on the command line are added to it
+        app.restore(&session::load());
+        for f in files { app.open_path(PathBuf::from(f)); }
         if app.tabs.is_empty() { app.new_tab(); }
         app
     }
@@ -155,27 +155,45 @@ impl App {
         let hl = &self.hl;
         Session {
             active: self.active,
-            tabs: self.tabs.iter().map(|b| {
-                let (l, c) = b.pos(b.primary().head);
-                TabState { path: b.path.as_ref().map(|p| p.to_string_lossy().into_owned()),
-                           unsaved: if b.modified || b.path.is_none() { Some(b.contents()) } else { None },
-                           cursor_line: l, cursor_col: c, scroll: b.scroll, syntax: Some(hl.name_of(b.syntax)) }
-            }).collect(),
+            tabs: self.tabs.iter().map(|b| Self::tab_state(hl, b)).collect(),
+            closed: self.closed.clone(),
         }
     }
 
+    fn tab_state(hl: &Highlighter, b: &Buffer) -> TabState {
+        let (l, c) = b.pos(b.primary().head);
+        TabState { path: b.path.as_ref().map(|p| p.to_string_lossy().into_owned()),
+                   unsaved: if b.modified || b.path.is_none() { Some(b.contents()) } else { None },
+                   cursor_line: l, cursor_col: c, scroll: b.scroll, syntax: Some(hl.name_of(b.syntax)) }
+    }
+
+    fn tab_from_state(&mut self, t: &TabState) -> Option<Buffer> {
+        let mut b = match (&t.unsaved, &t.path) {
+            (Some(text), p) => { let mut b = Buffer::from_text(text, p.as_ref().map(PathBuf::from)); b.modified = true; b }
+            (None, Some(p)) => Buffer::open(std::path::Path::new(p)).ok()?,
+            (None, None) => return None,
+        };
+        let first = b.text.line(0).to_string();
+        b.syntax = t.syntax.as_deref().and_then(|n| self.hl.index_of(n)).unwrap_or_else(|| self.hl.detect(t.path.as_deref(), &first));
+        b.set_cursor_line_col(t.cursor_line, t.cursor_col);
+        b.scroll = t.scroll;
+        Some(b)
+    }
+
+    /// remember a tab that is being closed (not an empty untitled one)
+    fn remember_closed(&mut self, i: usize) {
+        let b = &self.tabs[i];
+        if b.path.is_none() && b.len() == 0 { return; }
+        let st = Self::tab_state(&self.hl, b);
+        self.closed.retain(|c| !(c.path.is_some() && c.path == st.path));
+        self.closed.push(st);
+        if self.closed.len() > 30 { self.closed.remove(0); }
+    }
+
     pub fn restore(&mut self, s: &Session) {
+        self.closed = s.closed.clone();
         for t in &s.tabs {
-            let mut b = match (&t.unsaved, &t.path) {
-                (Some(text), p) => { let mut b = Buffer::from_text(text, p.as_ref().map(PathBuf::from)); b.modified = true; b }
-                (None, Some(p)) => match Buffer::open(std::path::Path::new(p)) { Ok(b) => b, Err(_) => continue },
-                (None, None) => continue,
-            };
-            let first = b.text.line(0).to_string();
-            b.syntax = t.syntax.as_deref().and_then(|n| self.hl.index_of(n)).unwrap_or_else(|| self.hl.detect(t.path.as_deref(), &first));
-            b.set_cursor_line_col(t.cursor_line, t.cursor_col);
-            b.scroll = t.scroll;
-            self.tabs.push(b);
+            if let Some(b) = self.tab_from_state(t) { self.tabs.push(b); }
         }
         self.active = s.active.min(self.tabs.len().saturating_sub(1));
     }
@@ -204,6 +222,19 @@ impl App {
                 self.prompt = Some(Prompt { kind: PromptKind::SaveAs, label: "Save as:".into(), input: cur, aux: String::new() });
             }
             Action::Close => self.close_active(false),
+            Action::ReopenClosed => match self.closed.pop() {
+                Some(t) => match self.tab_from_state(&t) { Some(b) => { self.tabs.push(b); self.active = self.tabs.len() - 1; } None => self.msg = "that file is gone".into() },
+                None => self.msg = "no closed tabs".into(),
+            },
+            Action::ClosedTabs => {
+                if self.closed.is_empty() { self.msg = "no closed tabs".into(); } else {
+                    let items = self.closed.iter().rev().enumerate().map(|(n, t)| {
+                        let name = t.path.as_deref().map(|p| p.to_string()).unwrap_or_else(|| "untitled".into());
+                        format!("{}. {}{}", n + 1, name, if t.unsaved.is_some() { "  (unsaved text)" } else { "" })
+                    }).collect();
+                    self.picker = Some(Picker { kind: PickerKind::Closed, filter: String::new(), items, sel: 0 });
+                }
+            }
             Action::NextTab => self.active = (self.active + 1) % self.tabs.len(),
             Action::PrevTab => self.active = (self.active + self.tabs.len() - 1) % self.tabs.len(),
             Action::Quit => {
@@ -251,6 +282,7 @@ impl App {
     }
 
     fn close_active(&mut self, _force: bool) {
+        self.remember_closed(self.active.min(self.tabs.len() - 1));
         if self.tabs.len() == 1 {
             // last tab: becomes an empty untitled one, like Notepad++
             self.tabs[0] = Buffer::new();
@@ -290,7 +322,7 @@ impl App {
                     'q' => Some(Action::Quit), 'z' if shift => Some(Action::Redo), 'z' => Some(Action::Undo), 'y' => Some(Action::Redo),
                     'x' => Some(Action::Cut), 'c' => Some(Action::Copy), 'v' => Some(Action::Paste), 'a' => Some(Action::SelectAll),
                     'f' => Some(Action::Find), 'h' => Some(Action::Replace), 'g' => Some(Action::Goto), 'd' if shift => Some(Action::DuplicateLine),
-                    'd' => Some(Action::NextOccurrence), 'k' => Some(Action::DeleteLine), 'l' => Some(Action::Language), 'p' | 'e' => Some(Action::Palette),
+                    'd' => Some(Action::NextOccurrence), 't' => Some(Action::ReopenClosed), 'k' => Some(Action::DeleteLine), 'l' => Some(Action::Language), 'p' | 'e' => Some(Action::Palette),
                     _ => None,
                 };
                 if let Some(a) = a { return self.run(a); }
@@ -407,6 +439,13 @@ impl App {
         match kind {
             PickerKind::Palette => if let Some(a) = PALETTE.iter().find(|p| p.0 == item) { self.run(a.1); },
             PickerKind::Language => if let Some(i) = self.hl.index_of(item) { self.buf().syntax = i; self.hl.invalidate_from(0); },
+            PickerKind::Closed => {
+                let n: usize = item.split('.').next().and_then(|x| x.parse().ok()).unwrap_or(0);
+                if n >= 1 && n <= self.closed.len() {
+                    let t = self.closed.remove(self.closed.len() - n);
+                    match self.tab_from_state(&t) { Some(b) => { self.tabs.push(b); self.active = self.tabs.len() - 1; } None => self.msg = "that file is gone".into() }
+                }
+            }
             PickerKind::Sessions => if let Some(s) = session::load_named(&self.session_dir, item) { self.tabs.clear(); self.restore(&s); if self.tabs.is_empty() { self.new_tab(); } },
         }
     }
@@ -448,7 +487,7 @@ impl App {
                     }
                 }
                 if let Some((_, i)) = self.layout.menus.iter().find(|(r, _)| Self::hit(*r, x, y)).copied() {
-                    self.menu = if self.menu == Some(i) { None } else { Some(i) };
+                    self.menu = Some(i);
                     return;
                 }
                 self.menu = None;
@@ -475,6 +514,17 @@ impl App {
                 self.buf().drag_to(p);
             }
             MouseEventKind::Up(_) => self.dragging = false,
+            MouseEventKind::Moved => {
+                // like Fresh: just pointing at a menu opens it, moving away from the bar and the open menu closes it
+                if self.prompt.is_some() || self.picker.is_some() { return; }
+                if let Some((_, i)) = self.layout.menus.iter().find(|(r, _)| Self::hit(*r, x, y)).copied() { self.menu = Some(i); self.hover_row = None; return; }
+                if self.menu.is_some() {
+                    match self.layout.dropdown {
+                        Some((r, _)) if Self::hit(r, x, y) => self.hover_row = (y > r.y).then(|| (y - r.y) as usize - 1),
+                        _ => { self.menu = None; self.hover_row = None; }
+                    }
+                }
+            }
             MouseEventKind::ScrollUp => { let b = self.buf(); b.scroll = b.scroll.saturating_sub(3); }
             MouseEventKind::ScrollDown => { let b = self.buf(); b.scroll = (b.scroll + 3).min(b.lines().saturating_sub(1)); }
             _ => {}

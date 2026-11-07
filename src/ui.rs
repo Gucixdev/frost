@@ -177,9 +177,11 @@ fn dropdown(f: &mut Frame, app: &mut App, mi: usize, bar: Rect) {
     f.render_widget(Clear, rect);
     let mut lines = vec![Line::from("")];
     lines.clear();
-    for it in items {
+    for (n, it) in items.iter().enumerate() {
         let pad = (w as usize).saturating_sub(it.0.len() + it.1.len() + 3);
-        lines.push(Line::from(vec![Span::raw(format!(" {}", it.0)), Span::raw(" ".repeat(pad)), Span::styled(it.1.to_string(), Style::default().fg(DIM)), Span::raw(" ")]));
+        let hov = app.hover_row == Some(n);
+        let row_style = if hov { Style::default().bg(ACCENT).fg(BG) } else { Style::default() };
+        lines.push(Line::from(vec![Span::raw(format!(" {}", it.0)), Span::raw(" ".repeat(pad)), Span::styled(it.1.to_string(), if hov { row_style } else { Style::default().fg(DIM) }), Span::raw(" ")]).style(row_style));
     }
     // row 0 of the rect is a thin top border line; items start at row 1 (the mouse code relies on this)
     let top = Rect::new(rect.x, rect.y, rect.width, 1);
@@ -201,7 +203,7 @@ fn picker(f: &mut Frame, app: &mut App, area: Rect) {
     let h = (shown.len() as u16 + 3).clamp(5, 20);
     let rect = centered(area, 56, h);
     f.render_widget(Clear, rect);
-    let title = match pk.kind { crate::app::PickerKind::Palette => " Command palette ", crate::app::PickerKind::Language => " Language ", crate::app::PickerKind::Sessions => " Sessions " };
+    let title = match pk.kind { crate::app::PickerKind::Palette => " Command palette ", crate::app::PickerKind::Language => " Language ", crate::app::PickerKind::Sessions => " Sessions ", crate::app::PickerKind::Closed => " Closed tabs " };
     let block = Block::default().borders(Borders::ALL).title(title).border_style(Style::default().fg(ACCENT)).style(Style::default().bg(BAR).fg(FG));
     let inner = block.inner(rect);
     f.render_widget(block, rect);

@@ -18,6 +18,9 @@ pub struct TabState {
 pub struct Session {
     pub tabs: Vec<TabState>,
     pub active: usize,
+    /// recently closed tabs (newest last), kept across restarts so a closed tab can come back like in Notepad++
+    #[serde(default)]
+    pub closed: Vec<TabState>,
 }
 
 pub fn session_dir() -> PathBuf {
@@ -126,6 +129,7 @@ mod tests {
     fn test_round_trip() {
         let dir = tempdir().unwrap();
         let session = Session {
+            closed: vec![],
             tabs: vec![TabState {
                 path: Some("test.txt".to_string()),
                 unsaved: None,
@@ -157,6 +161,7 @@ mod tests {
     fn test_named_session_round_trip() {
         let dir = tempdir().unwrap();
         let session = Session {
+            closed: vec![],
             tabs: vec![TabState {
                 path: Some("test.txt".to_string()),
                 unsaved: None,
