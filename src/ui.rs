@@ -6,22 +6,16 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, Paragraph, Wrap};
 use ratatui::Frame;
 
-const BG: Color = Color::Rgb(30, 31, 36);
-const BAR: Color = Color::Rgb(44, 46, 54);
-const DIM: Color = Color::Rgb(120, 124, 138);
-const FG: Color = Color::Rgb(205, 209, 220);
-const ACCENT: Color = Color::Rgb(97, 175, 239);
-const SEL: Color = Color::Rgb(62, 78, 110);
-const CUR2: Color = Color::Rgb(229, 192, 123);
 
 pub fn draw(f: &mut Frame, app: &mut App) {
     let area = f.area();
-    f.render_widget(Block::default().style(Style::default().bg(BG).fg(FG)), area);
+    f.render_widget(Block::default().style(Style::default().bg(crate::config::theme().bg).fg(crate::config::theme().fg)), area);
     let rows = RLayout::vertical([Constraint::Length(1), Constraint::Length(1), Constraint::Min(1), Constraint::Length(1)]).split(area);
     app.layout.menus.clear();
     app.layout.tabs.clear();
     app.layout.dropdown = None;
     app.layout.picker = None;
+    app.layout.caret = None;
 
     menu_bar(f, app, rows[0]);
     tab_bar(f, app, rows[1]);
@@ -33,18 +27,19 @@ pub fn draw(f: &mut Frame, app: &mut App) {
     text_area(f, app, rows[2], gutter);
     status_bar(f, app, rows[3]);
 
+    suggestions(f, app, area);
     if let Some(mi) = app.menu { dropdown(f, app, mi, rows[0]); }
     if app.picker.is_some() { picker(f, app, area); }
     if app.show_help { help(f, area); }
 }
 
 fn menu_bar(f: &mut Frame, app: &mut App, r: Rect) {
-    f.render_widget(Block::default().style(Style::default().bg(BAR)), r);
+    f.render_widget(Block::default().style(Style::default().bg(crate::config::theme().bar)), r);
     let mut x = r.x + 1;
     for (i, (name, _)) in MENUS.iter().enumerate() {
         let w = name.len() as u16 + 2;
         let rect = Rect::new(x, r.y, w, 1);
-        let st = if app.menu == Some(i) { Style::default().bg(ACCENT).fg(BG) } else { Style::default().bg(BAR).fg(FG) };
+        let st = if app.menu == Some(i) { Style::default().bg(crate::config::theme().accent).fg(crate::config::theme().bg) } else { Style::default().bg(crate::config::theme().bar).fg(crate::config::theme().fg) };
         f.render_widget(Paragraph::new(format!(" {name} ")).style(st), rect);
         app.layout.menus.push((rect, i));
         x += w;
@@ -52,14 +47,14 @@ fn menu_bar(f: &mut Frame, app: &mut App, r: Rect) {
 }
 
 fn tab_bar(f: &mut Frame, app: &mut App, r: Rect) {
-    f.render_widget(Block::default().style(Style::default().bg(Color::Rgb(36, 38, 45))), r);
+    f.render_widget(Block::default().style(Style::default().bg({ let t = crate::config::theme(); mix(t.bar, t.bg) })), r);
     let mut x = r.x;
     for (i, b) in app.tabs.iter().enumerate() {
         let label = format!(" {}{} ", b.name(), if b.modified { " ●" } else { "" });
         let w = label.chars().count() as u16;
         if x + w > r.x + r.width { break; }
         let rect = Rect::new(x, r.y, w, 1);
-        let st = if i == app.active { Style::default().bg(BG).fg(ACCENT).add_modifier(Modifier::BOLD) } else { Style::default().bg(Color::Rgb(36, 38, 45)).fg(DIM) };
+        let st = if i == app.active { Style::default().bg(crate::config::theme().bg).fg(crate::config::theme().accent).add_modifier(Modifier::BOLD) } else { Style::default().bg({ let t = crate::config::theme(); mix(t.bar, t.bg) }).fg(crate::config::theme().dim) };
         f.render_widget(Paragraph::new(label).style(st), rect);
         app.layout.tabs.push((rect, i));
         x += w + 1;
@@ -113,7 +108,7 @@ fn text_area(f: &mut Frame, app: &mut App, r: Rect, gutter: u16) {
         let mut row: Vec<Span> = vec![];
         if gutter > 0 {
             let cur_line = b.cursors.iter().any(|c| b.pos(c.head).0 == ln);
-            let st = Style::default().fg(if cur_line { ACCENT } else { DIM });
+            let st = Style::default().fg(if cur_line { crate::config::theme().accent } else { crate::config::theme().dim });
             row.push(Span::styled(format!("{:>w$} ", ln + 1, w = gutter as usize - 1), st));
         }
         let cs = cells(spans);
@@ -122,8 +117,8 @@ fn text_area(f: &mut Frame, app: &mut App, r: Rect, gutter: u16) {
             if shown >= width { break; }
             let abs = start + col;
             let mut st = *st;
-            if b.cursors.iter().any(|c| c.has_sel() && abs >= c.start() && abs < c.end()) { st = st.bg(SEL); }
-            if b.cursors.iter().any(|c| c.head == abs && c.head != primary.head) { st = st.bg(CUR2).fg(BG); }
+            if b.cursors.iter().any(|c| c.has_sel() && abs >= c.start() && abs < c.end()) { st = st.bg(crate::config::theme().sel); }
+            if b.cursors.iter().any(|c| c.head == abs && c.head != primary.head) { st = st.bg(crate::config::theme().cursor2).fg(crate::config::theme().bg); }
             row.push(Span::styled(ch.to_string(), st));
             shown += 1;
         }
@@ -134,7 +129,7 @@ fn text_area(f: &mut Frame, app: &mut App, r: Rect, gutter: u16) {
             if c.head == start + line_len && end_disp >= hscroll && end_disp - hscroll < width {
                 let pad = (end_disp - hscroll).saturating_sub(shown);
                 if pad > 0 { row.push(Span::raw(" ".repeat(pad))); shown += pad; }
-                if end_disp - hscroll == shown { row.push(Span::styled(" ", Style::default().bg(CUR2))); shown += 1; }
+                if end_disp - hscroll == shown { row.push(Span::styled(" ", Style::default().bg(crate::config::theme().cursor2))); shown += 1; }
             }
         }
         lines.push(Line::from(row));
@@ -145,16 +140,18 @@ fn text_area(f: &mut Frame, app: &mut App, r: Rect, gutter: u16) {
     if l >= scroll && l < scroll + r.height as usize && app.prompt.is_none() && app.picker.is_none() {
         let d = display_col(&b.line_string(l), c);
         if d >= hscroll && d - hscroll < width {
-            f.set_cursor_position((r.x + gutter + (d - hscroll) as u16, r.y + (l - scroll) as u16));
+            let pos = (r.x + gutter + (d - hscroll) as u16, r.y + (l - scroll) as u16);
+            app.layout.caret = Some(pos);
+            f.set_cursor_position(pos);
         }
     }
 }
 
 fn status_bar(f: &mut Frame, app: &mut App, r: Rect) {
-    f.render_widget(Block::default().style(Style::default().bg(BAR)), r);
+    f.render_widget(Block::default().style(Style::default().bg(crate::config::theme().bar)), r);
     if let Some(p) = &app.prompt {
         let txt = format!(" {} {}", p.label, p.input);
-        f.render_widget(Paragraph::new(txt.clone()).style(Style::default().bg(BAR).fg(FG)), r);
+        f.render_widget(Paragraph::new(txt.clone()).style(Style::default().bg(crate::config::theme().bar).fg(crate::config::theme().fg)), r);
         f.set_cursor_position((r.x + txt.chars().count() as u16, r.y));
         return;
     }
@@ -166,7 +163,7 @@ fn status_bar(f: &mut Frame, app: &mut App, r: Rect) {
     let left = if app.msg.is_empty() { format!(" {}{}  (F1 keys, F10 menu)", b.name(), if b.modified { " [modified]" } else { "" }) } else { format!(" {}", app.msg) };
     let w = r.width as usize;
     let pad = w.saturating_sub(left.chars().count() + right.chars().count());
-    f.render_widget(Paragraph::new(format!("{left}{}{right}", " ".repeat(pad))).style(Style::default().bg(BAR).fg(FG)), r);
+    f.render_widget(Paragraph::new(format!("{left}{}{right}", " ".repeat(pad))).style(Style::default().bg(crate::config::theme().bar).fg(crate::config::theme().fg)), r);
 }
 
 fn dropdown(f: &mut Frame, app: &mut App, mi: usize, bar: Rect) {
@@ -180,14 +177,14 @@ fn dropdown(f: &mut Frame, app: &mut App, mi: usize, bar: Rect) {
     for (n, it) in items.iter().enumerate() {
         let pad = (w as usize).saturating_sub(it.0.len() + it.1.len() + 3);
         let hov = app.hover_row == Some(n);
-        let row_style = if hov { Style::default().bg(ACCENT).fg(BG) } else { Style::default() };
-        lines.push(Line::from(vec![Span::raw(format!(" {}", it.0)), Span::raw(" ".repeat(pad)), Span::styled(it.1.to_string(), if hov { row_style } else { Style::default().fg(DIM) }), Span::raw(" ")]).style(row_style));
+        let row_style = if hov { Style::default().bg(crate::config::theme().accent).fg(crate::config::theme().bg) } else { Style::default() };
+        lines.push(Line::from(vec![Span::raw(format!(" {}", it.0)), Span::raw(" ".repeat(pad)), Span::styled(it.1.to_string(), if hov { row_style } else { Style::default().fg(crate::config::theme().dim) }), Span::raw(" ")]).style(row_style));
     }
     // row 0 of the rect is a thin top border line; items start at row 1 (the mouse code relies on this)
     let top = Rect::new(rect.x, rect.y, rect.width, 1);
-    f.render_widget(Paragraph::new("").style(Style::default().bg(BAR)), top);
+    f.render_widget(Paragraph::new("").style(Style::default().bg(crate::config::theme().bar)), top);
     let body = Rect::new(rect.x, rect.y + 1, rect.width, rect.height - 1);
-    f.render_widget(Paragraph::new(lines).style(Style::default().bg(BAR).fg(FG)), body);
+    f.render_widget(Paragraph::new(lines).style(Style::default().bg(crate::config::theme().bar).fg(crate::config::theme().fg)), body);
     app.layout.dropdown = Some((rect, mi));
 }
 
@@ -204,14 +201,14 @@ fn picker(f: &mut Frame, app: &mut App, area: Rect) {
     let rect = centered(area, 56, h);
     f.render_widget(Clear, rect);
     let title = match pk.kind { crate::app::PickerKind::Palette => " Command palette ", crate::app::PickerKind::Language => " Language ", crate::app::PickerKind::Sessions => " Sessions ", crate::app::PickerKind::Closed => " Closed tabs " };
-    let block = Block::default().borders(Borders::ALL).title(title).border_style(Style::default().fg(ACCENT)).style(Style::default().bg(BAR).fg(FG));
+    let block = Block::default().borders(Borders::ALL).title(title).border_style(Style::default().fg(crate::config::theme().accent)).style(Style::default().bg(crate::config::theme().bar).fg(crate::config::theme().fg));
     let inner = block.inner(rect);
     f.render_widget(block, rect);
     let rows = inner.height.saturating_sub(1) as usize;
     let first = pk.sel.saturating_sub(rows.saturating_sub(1));
-    let mut lines = vec![Line::from(vec![Span::styled("> ", Style::default().fg(ACCENT)), Span::raw(pk.filter.clone())])];
+    let mut lines = vec![Line::from(vec![Span::styled("> ", Style::default().fg(crate::config::theme().accent)), Span::raw(pk.filter.clone())])];
     for (n, &i) in shown.iter().enumerate().skip(first).take(rows) {
-        let st = if n == pk.sel { Style::default().bg(ACCENT).fg(BG) } else { Style::default() };
+        let st = if n == pk.sel { Style::default().bg(crate::config::theme().accent).fg(crate::config::theme().bg) } else { Style::default() };
         // Language list is alphabetical: show the initial letter in a margin where a new letter starts
         let lang = matches!(pk.kind, crate::app::PickerKind::Language) && pk.filter.is_empty();
         let ini = |s: &str| s.chars().next().map(|c| c.to_ascii_uppercase()).unwrap_or(' ');
@@ -226,8 +223,36 @@ fn picker(f: &mut Frame, app: &mut App, area: Rect) {
 fn help(f: &mut Frame, area: Rect) {
     let rect = centered(area, 70, 12);
     f.render_widget(Clear, rect);
-    let block = Block::default().borders(Borders::ALL).title(" Keys (any key closes) ").border_style(Style::default().fg(ACCENT)).style(Style::default().bg(BAR).fg(FG));
+    let block = Block::default().borders(Borders::ALL).title(" Keys (any key closes) ").border_style(Style::default().fg(crate::config::theme().accent)).style(Style::default().bg(crate::config::theme().bar).fg(crate::config::theme().fg));
     let inner = block.inner(rect);
     f.render_widget(block, rect);
     f.render_widget(Paragraph::new(HELP.replace(" | ", "\n\n")).wrap(Wrap { trim: true }), inner);
+}
+
+fn mix(a: Color, b: Color) -> Color {
+    match (a, b) { (Color::Rgb(r1, g1, b1), Color::Rgb(r2, g2, b2)) => Color::Rgb(((r1 as u16 + r2 as u16) / 2) as u8, ((g1 as u16 + g2 as u16) / 2) as u8, ((b1 as u16 + b2 as u16) / 2) as u8), _ => a }
+}
+
+/// the word popup under the caret (TempleOS-style: word and meaning)
+fn suggestions(f: &mut Frame, app: &App, area: Rect) {
+    let (Some((items, sel, _)), Some((cx, cy))) = (app.suggest.as_ref(), app.layout.caret) else { return };
+    if app.menu.is_some() || app.picker.is_some() || app.prompt.is_some() { return; }
+    let t = crate::config::theme();
+    let w = items.iter().map(|(a, b)| a.chars().count() + b.chars().count() + 5).max().unwrap_or(10).clamp(16, 60) as u16;
+    let h = items.len() as u16;
+    let w = w.min(area.width);
+    let x = cx.min(area.x + area.width - w);
+    let y = if cy + 1 + h < area.y + area.height { cy + 1 } else { cy.saturating_sub(h) };
+    let rect = Rect::new(x, y, w, h);
+    f.render_widget(Clear, rect);
+    let lines: Vec<Line> = items.iter().enumerate().map(|(i, (word, meaning))| {
+        let st = if i == *sel { Style::default().bg(t.accent).fg(t.bg) } else { Style::default().bg(t.bar).fg(t.fg) };
+        let dim = if i == *sel { st } else { Style::default().bg(t.bar).fg(t.dim) };
+        let mut s = format!(" {word} ");
+        let m: String = meaning.chars().take((w as usize).saturating_sub(s.chars().count() + 2)).collect();
+        let pad = (w as usize).saturating_sub(s.chars().count() + m.chars().count());
+        if !m.is_empty() { s.push(' '); }
+        Line::from(vec![Span::styled(s, st), Span::styled(m, dim), Span::styled(" ".repeat(pad), st)])
+    }).collect();
+    f.render_widget(Paragraph::new(lines), rect);
 }

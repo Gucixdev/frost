@@ -1,6 +1,8 @@
 //! frost - a small terminal editor. Fresh-like layout, micro-like keys, CUA + mouse + multi-cursor, Notepad++-style sessions.
 mod app;
 mod buffer;
+mod config;
+mod dict;
 mod highlight;
 mod session;
 mod ui;

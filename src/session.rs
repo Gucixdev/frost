@@ -27,7 +27,9 @@ pub fn session_dir() -> PathBuf {
     if let Some(x) = std::env::var_os("XDG_STATE_HOME").filter(|v| !v.is_empty()) {
         return PathBuf::from(x).join("frost");
     }
+    if cfg!(windows) { if let Some(a) = std::env::var_os("LOCALAPPDATA") { return PathBuf::from(a).join("frost"); } }
     match std::env::var_os("HOME").filter(|v| !v.is_empty()) {
+        Some(h) if cfg!(target_os = "macos") => PathBuf::from(h).join("Library/Application Support/frost/state"),
         Some(h) => PathBuf::from(h).join(".local/state/frost"),
         None => PathBuf::from(".frost"),
     }

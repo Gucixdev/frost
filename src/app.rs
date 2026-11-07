@@ -14,7 +14,7 @@ pub enum Action {
     New, Open, Save, SaveAs, Close, NextTab, PrevTab, Quit,
     Undo, Redo, Cut, Copy, Paste, SelectAll, DuplicateLine, DeleteLine, Indent, Unindent,
     Find, FindNext, FindPrev, Replace, Goto, NextOccurrence, CursorUp, CursorDown, OneCursor,
-    Language, Palette, ReopenClosed, ClosedTabs, SaveSession, LoadSession, ToggleLineNumbers, Help,
+    Language, Define, Palette, ReopenClosed, ClosedTabs, SaveSession, LoadSession, ToggleLineNumbers, Help,
 }
 
 pub const MENUS: &[(&str, &[(&str, &str, Action)])] = &[
@@ -22,7 +22,7 @@ pub const MENUS: &[(&str, &[(&str, &str, Action)])] = &[
                ("Close tab", "Ctrl-W", Action::Close), ("Reopen closed tab", "Ctrl-T", Action::ReopenClosed), ("Closed tabs...", "", Action::ClosedTabs), ("Save session as...", "", Action::SaveSession), ("Load session...", "", Action::LoadSession), ("Quit", "Ctrl-Q", Action::Quit)]),
     ("Edit", &[("Undo", "Ctrl-Z", Action::Undo), ("Redo", "Ctrl-Y", Action::Redo), ("Cut", "Ctrl-X", Action::Cut), ("Copy", "Ctrl-C", Action::Copy), ("Paste", "Ctrl-V", Action::Paste),
                ("Select all", "Ctrl-A", Action::SelectAll), ("Duplicate line", "Ctrl-Shift-D", Action::DuplicateLine), ("Delete line", "Ctrl-K", Action::DeleteLine),
-               ("Indent", "Tab", Action::Indent), ("Unindent", "Shift-Tab", Action::Unindent)]),
+               ("Define word", "F2", Action::Define), ("Indent", "Tab", Action::Indent), ("Unindent", "Shift-Tab", Action::Unindent)]),
     ("Search", &[("Find...", "Ctrl-F", Action::Find), ("Find next", "F3", Action::FindNext), ("Find previous", "Shift-F3", Action::FindPrev), ("Replace all...", "Ctrl-H", Action::Replace),
                  ("Go to line...", "Ctrl-G", Action::Goto)]),
     ("Cursors", &[("Add next occurrence", "Ctrl-D", Action::NextOccurrence), ("Add cursor above", "Alt-Up", Action::CursorUp), ("Add cursor below", "Alt-Down", Action::CursorDown),
@@ -37,7 +37,7 @@ const PALETTE: &[(&str, Action)] = &[
     ("Undo", Action::Undo), ("Redo", Action::Redo), ("Select all", Action::SelectAll), ("Duplicate line", Action::DuplicateLine), ("Delete line", Action::DeleteLine),
     ("Find", Action::Find), ("Replace all", Action::Replace), ("Go to line", Action::Goto), ("Add next occurrence (multi-cursor)", Action::NextOccurrence),
     ("Add cursor above", Action::CursorUp), ("Add cursor below", Action::CursorDown), ("Single cursor", Action::OneCursor), ("Choose language", Action::Language),
-    ("Reopen closed tab", Action::ReopenClosed), ("Closed tabs", Action::ClosedTabs), ("Save session as", Action::SaveSession), ("Load session", Action::LoadSession), ("Toggle line numbers", Action::ToggleLineNumbers), ("Keys", Action::Help),
+    ("Define word", Action::Define), ("Reopen closed tab", Action::ReopenClosed), ("Closed tabs", Action::ClosedTabs), ("Save session as", Action::SaveSession), ("Load session", Action::LoadSession), ("Toggle line numbers", Action::ToggleLineNumbers), ("Keys", Action::Help),
 ];
 
 pub const HELP: &str = "Ctrl-S save  Ctrl-O open  Ctrl-N new  Ctrl-W close  Ctrl-Q quit | Ctrl-Z/Y undo/redo  Ctrl-X/C/V  Ctrl-A all  Ctrl-K del line | \
@@ -72,6 +72,7 @@ pub struct Layout {
     pub menus: Vec<(Rect, usize)>,
     pub dropdown: Option<(Rect, usize)>, // area and menu index
     pub picker: Option<Rect>,
+    pub caret: Option<(u16, u16)>,
 }
 
 pub struct App {
@@ -95,10 +96,23 @@ pub struct App {
     pub hl_key: (u64, u64),
     pub closed: Vec<TabState>,
     pub hover_row: Option<usize>,
+    pub keymap: std::collections::HashMap<String, Action>,
+    pub dict: crate::dict::Dict,
+    /// word suggestions under the caret: (word, meaning) list, selected row, chars already typed
+    pub suggest: Option<(Vec<(String, String)>, usize, usize)>,
+}
+
+/// (program, args) pairs tried in order: Wayland, X11, macOS, Windows
+fn clip_set_cmds() -> Vec<(&'static str, Vec<&'static str>)> {
+    vec![("wl-copy", vec![]), ("xclip", vec!["-selection", "clipboard"]), ("xsel", vec!["-ib"]), ("pbcopy", vec![]), ("clip.exe", vec![]), ("clip", vec![])]
+}
+fn clip_get_cmds() -> Vec<(&'static str, Vec<&'static str>)> {
+    vec![("wl-paste", vec!["-n"]), ("xclip", vec!["-selection", "clipboard", "-o"]), ("xsel", vec!["-ob"]), ("pbpaste", vec![]),
+         ("powershell.exe", vec!["-NoProfile", "-Command", "Get-Clipboard -Raw"])]
 }
 
 fn set_system_clipboard(s: &str) {
-    for cmd in [("wl-copy", vec![]), ("xclip", vec!["-selection", "clipboard"])] {
+    for cmd in clip_set_cmds() {
         if let Ok(mut c) = Command::new(cmd.0).args(&cmd.1).stdin(Stdio::piped()).stdout(Stdio::null()).stderr(Stdio::null()).spawn() {
             if let Some(mut i) = c.stdin.take() { let _ = i.write_all(s.as_bytes()); }
             let _ = c.wait();
@@ -108,7 +122,7 @@ fn set_system_clipboard(s: &str) {
 }
 
 fn get_system_clipboard() -> Option<String> {
-    for cmd in [("wl-paste", vec!["-n"]), ("xclip", vec!["-selection", "clipboard", "-o"])] {
+    for cmd in clip_get_cmds() {
         if let Ok(o) = Command::new(cmd.0).args(&cmd.1).stderr(Stdio::null()).output() {
             if o.status.success() { return Some(String::from_utf8_lossy(&o.stdout).into_owned()); }
         }
@@ -121,7 +135,12 @@ impl App {
         let hl = Highlighter::new();
         let mut app = App { tabs: vec![], active: 0, hl, prompt: None, picker: None, menu: None, msg: String::new(), quit: false, line_numbers: true,
                             layout: Layout::default(), show_help: false, last_find: String::new(), clip: String::new(), dragging: false,
-                            clicks: (Instant::now(), 0, 0, 0), confirm_quit: false, session_dir: session::session_dir(), hl_key: (0, 0), closed: vec![], hover_row: None };
+                            clicks: (Instant::now(), 0, 0, 0), confirm_quit: false, session_dir: session::session_dir(), hl_key: (0, 0), closed: vec![], hover_row: None, keymap: Default::default(), dict: crate::dict::Dict::load(None), suggest: None };
+        let cfg = crate::config::load();
+        app.line_numbers = cfg.line_numbers;
+        app.keymap = cfg.keys.iter().filter_map(|(k, v)| action_by_name(v).map(|a| (k.clone(), a))).collect();
+        if cfg.dictionary.is_some() { app.dict = crate::dict::Dict::load(cfg.dictionary.clone()); }
+        if let Some(e) = cfg.error { app.msg = e; }
         // like Notepad++: the previous session always comes back, files named on the command line are added to it
         app.restore(&session::load());
         for f in files { app.open_path(PathBuf::from(f)); }
@@ -231,6 +250,12 @@ impl App {
                 let cur = self.buf().path.as_ref().map(|p| p.to_string_lossy().into_owned()).unwrap_or_default();
                 self.prompt = Some(Prompt { kind: PromptKind::SaveAs, label: "Save as:".into(), input: cur, aux: String::new() });
             }
+            Action::Define => {
+                let (w, _) = self.buf().word_at_caret();
+                self.msg = if w.is_empty() { "put the caret on a word".into() } else {
+                    match self.dict.define(&w) { Some(m) => format!("{w}: {m}"), None => format!("{w}: no entry (add it to ~/.config/frost/dictionary.txt)") }
+                };
+            }
             Action::Close => self.close_active(false),
             Action::ReopenClosed => match self.closed.pop() {
                 Some(t) => match self.tab_from_state(&t) { Some(b) => { self.tabs.push(b); self.active = self.tabs.len() - 1; } None => self.msg = "that file is gone".into() },
@@ -317,7 +342,42 @@ impl App {
 
     // ---------------------------------------------------------------- keyboard
     pub fn on_key(&mut self, k: KeyEvent) {
+        if self.suggest.is_some() && self.picker.is_none() && self.prompt.is_none() && self.menu.is_none() {
+            let n = self.suggest.as_ref().map(|s| s.0.len()).unwrap_or(0);
+            match k.code {
+                KeyCode::Tab if k.modifiers.is_empty() => { self.accept_suggestion(); return; }
+                KeyCode::Down => { if let Some(s) = self.suggest.as_mut() { s.1 = (s.1 + 1) % n; } return; }
+                KeyCode::Up => { if let Some(s) = self.suggest.as_mut() { s.1 = (s.1 + n - 1) % n; } return; }
+                KeyCode::Esc => { self.suggest = None; return; }
+                _ => {}
+            }
+        }
+        let typing = matches!(k.code, KeyCode::Char(_) | KeyCode::Backspace) && !k.modifiers.intersects(KeyModifiers::CONTROL | KeyModifiers::ALT);
+        self.on_key_inner(k);
+        if typing { self.update_suggest(); } else { self.suggest = None; }
+    }
+
+    fn update_suggest(&mut self) {
+        self.suggest = None;
+        if self.picker.is_some() || self.prompt.is_some() || self.tabs.is_empty() { return; }
+        let b = &self.tabs[self.active.min(self.tabs.len() - 1)];
+        if b.cursors.len() != 1 || b.cursors[0].has_sel() { return; }
+        let (w, start) = b.word_at_caret();
+        let typed = b.cursors[0].head - start;
+        if typed < 2 || typed != w.chars().count() { return; }   // only while the caret is at the end of the word
+        let items = self.dict.complete(&w, &b.nearby_words(300), 8);
+        if !items.is_empty() { self.suggest = Some((items, 0, typed)); }
+    }
+
+    fn accept_suggestion(&mut self) {
+        if let Some((items, sel, n)) = self.suggest.take() { self.buf().replace_before_caret(n, &items[sel].0); }
+    }
+
+    fn on_key_inner(&mut self, k: KeyEvent) {
         self.confirm_quit = false;
+        if self.picker.is_none() && self.prompt.is_none() && self.menu.is_none() && !self.keymap.is_empty() {
+            if let Some(&a) = self.keymap.get(&key_spec(&k)) { return self.run(a); }
+        }
         if self.show_help { self.show_help = false; if k.code == KeyCode::Esc { return; } }
         if self.picker.is_some() { return self.picker_key(k); }
         if self.prompt.is_some() { return self.prompt_key(k); }
@@ -360,6 +420,7 @@ impl App {
             KeyCode::PageUp => self.buf().move_cursors(Move::PageUp(page), shift),
             KeyCode::PageDown => self.buf().move_cursors(Move::PageDown(page), shift),
             KeyCode::F(1) => self.run(Action::Help),
+            KeyCode::F(2) => self.run(Action::Define),
             KeyCode::F(3) => self.run(if shift { Action::FindPrev } else { Action::FindNext }),
             KeyCode::F(10) => self.menu = Some(0),
             _ => {}
@@ -569,4 +630,38 @@ fn shellexpand(s: &str) -> String {
         if let Some(h) = std::env::var_os("HOME") { return format!("{}/{}", h.to_string_lossy(), rest); }
     }
     s.to_string()
+}
+
+/// "ctrl-shift-t", "alt-up", "f5", "a": the text form of a key press used by init.lua `frost.keys`
+pub fn key_spec(k: &KeyEvent) -> String {
+    let mut s = String::new();
+    if k.modifiers.contains(KeyModifiers::CONTROL) { s.push_str("ctrl-"); }
+    if k.modifiers.contains(KeyModifiers::ALT) { s.push_str("alt-"); }
+    if k.modifiers.contains(KeyModifiers::SHIFT) { s.push_str("shift-"); }
+    match k.code {
+        KeyCode::Char(c) => s.push(c.to_ascii_lowercase()),
+        KeyCode::F(n) => s.push_str(&format!("f{n}")),
+        other => s.push_str(&format!("{other:?}").to_lowercase()),
+    }
+    s
+}
+
+/// action names for init.lua: the Debug name in lower case ("save", "reopenclosed", "nextoccurrence")
+pub fn action_by_name(name: &str) -> Option<Action> {
+    let all = MENUS.iter().flat_map(|m| m.1.iter().map(|i| i.2)).chain(PALETTE.iter().map(|p| p.1));
+    all.into_iter().find(|a| format!("{a:?}").to_lowercase() == name)
+}
+
+#[cfg(test)]
+mod key_tests {
+    use super::*;
+    #[test]
+    fn spec_and_names() {
+        let k = KeyEvent::new(KeyCode::Char('J'), KeyModifiers::CONTROL);
+        assert_eq!(key_spec(&k), "ctrl-j");
+        assert_eq!(key_spec(&KeyEvent::new(KeyCode::Up, KeyModifiers::ALT)), "alt-up");
+        assert!(action_by_name("goto").is_some() || action_by_name("save").is_some());
+        assert_eq!(action_by_name("save"), Some(Action::Save));
+        assert_eq!(action_by_name("nope"), None);
+    }
 }

@@ -115,6 +115,45 @@ impl Buffer {
         self.redo.clear();
         self.last_kind = kind;
     }
+    /// replace the `n` chars before the single caret with `with` (accepting a completion)
+    pub fn replace_before_caret(&mut self, n: usize, with: &str) {
+        if self.cursors.len() != 1 || self.cursors[0].has_sel() { return; }
+        self.checkpoint("complete");
+        let h = self.cursors[0].head;
+        let s = h.saturating_sub(n);
+        self.text.remove(s..h);
+        self.text.insert(s, with);
+        self.cursors = vec![Cursor::at(s + with.chars().count())];
+        self.touched(self.text.char_to_line(s));
+        self.last_kind = "";
+    }
+
+    /// the word touching the primary caret and where it starts (char index)
+    pub fn word_at_caret(&self) -> (String, usize) {
+        let h = self.cursors[0].head;
+        let mut s = h;
+        while s > 0 && is_word(self.text.char(s - 1)) { s -= 1; }
+        let mut e = h;
+        while e < self.len() && is_word(self.text.char(e)) { e += 1; }
+        (self.text.slice(s..e).to_string(), s)
+    }
+
+    /// distinct words of 4+ letters in the lines around the caret, nearest first
+    pub fn nearby_words(&self, radius: usize) -> Vec<String> {
+        let l = self.text.char_to_line(self.cursors[0].head);
+        let (a, z) = (l.saturating_sub(radius), (l + radius).min(self.lines()));
+        let mut out: Vec<String> = vec![];
+        let mut order: Vec<usize> = (a..z).collect();
+        order.sort_by_key(|&i| i.abs_diff(l));
+        for i in order {
+            for w in self.text.line(i).to_string().split(|c: char| !is_word(c)) {
+                if w.chars().count() >= 4 && !out.iter().any(|o| o == w) { out.push(w.to_string()); }
+            }
+            if out.len() > 400 { break; }
+        }
+        out
+    }
+
     pub fn break_undo(&mut self) { self.last_kind = ""; }
     pub fn undo(&mut self) {
         if let Some(s) = self.undo.pop() {
@@ -249,7 +288,7 @@ impl Buffer {
             // plain Tab with no selection: just insert 4 spaces at each caret
             self.last_kind = "";
             self.undo.pop();
-            self.insert("    ");
+            self.insert(&" ".repeat(crate::config::tab_width()));
             return;
         }
         lines.sort();
@@ -258,14 +297,15 @@ impl Buffer {
             let st = self.text.line_to_char(l);
             if back {
                 let s = self.line_string(l);
-                let n = if s.starts_with('\t') { 1 } else { s.chars().take(4).take_while(|c| *c == ' ').count() };
+                let n = if s.starts_with('\t') { 1 } else { s.chars().take(crate::config::tab_width()).take_while(|c| *c == ' ').count() };
                 if n > 0 {
                     self.text.remove(st..st + n);
                     self.shift_after(st, -(n as isize));
                 }
             } else {
-                self.text.insert(st, "    ");
-                self.shift_after(st, 4);
+                let w = crate::config::tab_width();
+                self.text.insert(st, &" ".repeat(w));
+                self.shift_after(st, w as isize);
             }
         }
         self.touched(first);

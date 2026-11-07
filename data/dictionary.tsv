@@ -1,0 +1,66 @@
+algorithm	a finite list of steps that solves a problem
+allocate	reserve a block of memory for use
+argument	a value passed to a function
+array	a numbered row of values stored next to each other
+assert	state that something must be true, and stop if it is not
+atomic	done as one step that cannot be seen half finished
+binary	made of two states, 0 and 1; also a compiled program
+bit	the smallest unit of data, 0 or 1
+bootstrap	start a system from almost nothing
+branch	a separate line of work in version control; also a jump in code
+buffer	a block of memory holding data on its way somewhere
+bug	a mistake in a program
+byte	eight bits
+cache	a small fast copy of data kept close to where it is used
+callback	a function given to other code to be called later
+character	a single letter, digit or symbol
+checksum	a small number computed from data to detect damage
+cipher	a method of hiding the meaning of a message
+commit	a saved step in version control
+compile	translate source code into a program the machine runs
+concurrency	several things making progress during the same period
+cursor	the mark that shows where typing will appear
+daemon	a program that runs in the background
+deadlock	two tasks each waiting for the other, forever
+debug	find and remove mistakes from a program
+dictionary	a list of words with their meanings
+directory	a folder that holds files
+editor	a program for changing text
+encode	turn data into another form by a fixed rule
+endian	the order in which the bytes of a number are stored
+exception	an unexpected event that interrupts normal flow
+function	a named piece of code that does one job
+garbage	memory no longer used by anything
+hash	a number made from data, used for fast lookup
+heap	memory handed out while the program runs
+index	a position in a list, or a table used to find things fast
+inode	the record a file system keeps about one file
+kernel	the core of an operating system
+latency	the time between asking and getting an answer
+lazy	doing work only when its result is needed
+loop	code that repeats
+macro	a name that stands for a piece of text or code
+mutex	a lock so only one task enters a section at a time
+newline	the character that ends a line
+null	a value meaning nothing is here
+overflow	a number too big for the space reserved for it
+parse	read text and work out its structure
+pointer	a value that holds the address of other data
+process	a running program
+queue	things waiting in the order they arrived
+recursion	a function that calls itself
+refactor	change the shape of code without changing what it does
+regex	a pattern language for matching text
+rope	a tree of text pieces that makes editing huge files cheap
+scheduler	the part of a system that decides which task runs next
+segfault	a crash from touching memory that is not yours
+session	the state of work that can be saved and resumed
+socket	one end of a network connection
+stack	memory used in last-in first-out order for function calls
+syntax	the rules for how a language is written
+thread	a path of execution inside a process
+token	a small piece of text with a meaning, such as a word or symbol
+undo	take back the last change
+unicode	the standard that gives every character a number
+variable	a named place that holds a value
+vector	an array that can grow
