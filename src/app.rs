@@ -201,6 +201,13 @@ impl App {
         self.active = s.active.min(self.tabs.len().saturating_sub(1));
     }
 
+    /// called from the event loop: finish big-file loads; true while any is still running
+    pub fn tick(&mut self) -> bool {
+        let mut busy = false;
+        for t in &mut self.tabs { t.poll_load(); busy |= t.loading.is_some(); }
+        busy
+    }
+
     pub fn save_session(&mut self) {
         let s = self.snapshot();
         if let Err(e) = session::save(&s) { eprintln!("frost: cannot save session: {e}"); }
@@ -301,6 +308,7 @@ impl App {
         let b = self.buf();
         let c = b.primary();
         let from = if fwd { c.end() } else { c.start() };
+        b.ensure_loaded();
         match b.find(&needle, from, fwd) {
             Some((s, e)) => b.cursors = vec![crate::buffer::Cursor { head: e, anchor: s, want: None }],
             None => self.msg = format!("not found: {needle}"),
@@ -390,6 +398,7 @@ impl App {
         let needle = p.input.clone();
         let b = self.buf();
         let from = b.primary().start();
+        b.ensure_loaded();
         if let Some((s, e)) = b.find(&needle, from, true) { b.cursors = vec![crate::buffer::Cursor { head: e, anchor: s, want: None }]; }
     }
 

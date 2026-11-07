@@ -162,7 +162,7 @@ fn status_bar(f: &mut Frame, app: &mut App, r: Rect) {
     let syn = app.hl.name_of(app.tabs[i].syntax);
     let b = &app.tabs[i];
     let (l, c) = b.pos(b.primary().head);
-    let right = format!("{}  Ln {}, Col {}  {}  UTF-8  {}  ", if b.cursors.len() > 1 { format!("{} cursors", b.cursors.len()) } else { String::new() }, l + 1, c + 1, syn, if b.crlf { "CRLF" } else { "LF" });
+    let right = format!("{}  Ln {}, Col {}  {}  UTF-8  {}{}  ", if b.cursors.len() > 1 { format!("{} cursors", b.cursors.len()) } else { String::new() }, l + 1, c + 1, syn, if b.crlf { "CRLF" } else { "LF" }, b.load_pct().map(|p| format!("  loading {p}%")).unwrap_or_default());
     let left = if app.msg.is_empty() { format!(" {}{}  (F1 keys, F10 menu)", b.name(), if b.modified { " [modified]" } else { "" }) } else { format!(" {}", app.msg) };
     let w = r.width as usize;
     let pad = w.saturating_sub(left.chars().count() + right.chars().count());

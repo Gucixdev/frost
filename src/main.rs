@@ -37,7 +37,8 @@ fn main() -> io::Result<()> {
     let result = (|| -> io::Result<()> {
         while !app.quit {
             term.draw(|f| ui::draw(f, &mut app))?;
-            if event::poll(Duration::from_millis(500))? {
+            let busy = app.tick();
+            if event::poll(Duration::from_millis(if busy { 40 } else { 500 }))? {
                 match event::read()? {
                     Event::Key(k) if k.kind != KeyEventKind::Release => app.on_key(k),
                     Event::Mouse(m) => app.on_mouse(m),

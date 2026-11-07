@@ -38,6 +38,7 @@ pub struct Buffer {
     pub version: u64,
     pub first_changed: usize,
     pub id: u64,
+    pub loading: Option<Loader>,
 }
 
 fn is_word(c: char) -> bool { c.is_alphanumeric() || c == '_' }
@@ -45,7 +46,7 @@ fn is_word(c: char) -> bool { c.is_alphanumeric() || c == '_' }
 impl Buffer {
     pub fn new() -> Self {
         Buffer { text: Rope::new(), path: None, modified: false, crlf: false, cursors: vec![Cursor::at(0)], syntax: 0, scroll: 0, hscroll: 0,
-                 undo: vec![], redo: vec![], last_kind: "", version: 0, first_changed: usize::MAX,
+                 undo: vec![], redo: vec![], last_kind: "", version: 0, first_changed: usize::MAX, loading: None,
                  id: { static N: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1); N.fetch_add(1, std::sync::atomic::Ordering::Relaxed) } }
     }
 
@@ -58,25 +59,22 @@ impl Buffer {
         b
     }
 
-    pub fn open(path: &std::path::Path) -> std::io::Result<Self> {
-        let bytes = std::fs::read(path)?;
-        match std::str::from_utf8(&bytes) {
-            Ok(s) if s.len() > PAR_MIN => {
-                let (text, crlf) = parse_parallel(s);
-                let mut b = Buffer::new();
-                b.text = text; b.crlf = crlf; b.path = Some(path.to_path_buf());
-                Ok(b)
-            }
-            _ => Ok(Buffer::from_text(&String::from_utf8_lossy(&bytes), Some(path.to_path_buf()))),
-        }
-    }
-
     pub fn save(&mut self) -> std::io::Result<()> {
+        use std::io::Write;
+        self.ensure_loaded();
         let p = self.path.clone().ok_or_else(|| std::io::Error::new(std::io::ErrorKind::Other, "no file name"))?;
-        let mut s = self.text.to_string();
-        if self.crlf { s = s.replace('\n', "\r\n"); }
         let tmp = p.with_extension("frost-tmp");
-        std::fs::write(&tmp, s)?;
+        {
+            let mut w = std::io::BufWriter::with_capacity(1 << 20, std::fs::File::create(&tmp)?);
+            for chunk in self.text.chunks() {
+                if self.crlf {
+                    let mut it = chunk.split('\n');
+                    if let Some(first) = it.next() { w.write_all(first.as_bytes())?; }
+                    for part in it { w.write_all(b"\r\n")?; w.write_all(part.as_bytes())?; }
+                } else { w.write_all(chunk.as_bytes())?; }
+            }
+            w.flush()?;
+        }
         std::fs::rename(&tmp, &p)?;
         self.modified = false;
         Ok(())
@@ -109,10 +107,10 @@ impl Buffer {
 
     // ---------------------------------------------------------------- undo
     fn checkpoint(&mut self, kind: &'static str) {
+        self.ensure_loaded();
         let coalesce = kind == "type" && self.last_kind == "type";
         if !coalesce {
             self.undo.push(Snap { text: self.text.clone(), cursors: self.cursors.clone() });
-            if self.undo.len() > 2000 { self.undo.remove(0); }
         }
         self.redo.clear();
         self.last_kind = kind;
@@ -387,7 +385,7 @@ impl Buffer {
                 }
                 Move::End => self.idx(l, self.line_len(l)),
                 Move::DocStart => 0,
-                Move::DocEnd => self.len(),
+                Move::DocEnd => { self.ensure_loaded(); self.len() }
                 Move::Up | Move::Down | Move::PageUp(_) | Move::PageDown(_) => {
                     let w = want.unwrap_or(col);
                     want = Some(w);
@@ -489,23 +487,31 @@ impl Buffer {
     }
 
     // ---------------------------------------------------------------- search
+    /// case-insensitive search for `needle` inside single lines, wrapping around; line by line so a huge file is never copied
     pub fn find(&self, needle: &str, from: usize, forward: bool) -> Option<(usize, usize)> {
-        if needle.is_empty() { return None; }
-        let hay: Vec<char> = self.text.chars().flat_map(|c| c.to_lowercase()).collect();
-        // lowercasing can change the length for a few characters: fall back to exact matching then
-        if hay.len() != self.len() { return None; }
+        if needle.is_empty() || needle.contains('\n') { return None; }
         let nd: Vec<char> = needle.chars().flat_map(|c| c.to_lowercase()).collect();
         let n = nd.len();
-        if n > hay.len() { return None; }
-        let last = hay.len() - n;
-        let hit = |p: usize| hay[p..p + n] == nd[..];
-        if forward {
-            (from..=last).chain(0..from.min(last + 1)).find(|&p| p <= last && hit(p)).map(|p| (p, p + n))
-        } else {
-            (0..from.min(last + 1)).rev().chain((from..=last).rev()).find(|&p| hit(p)).map(|p| (p, p + n))
+        let total = self.lines();
+        let from = from.min(self.len());
+        let l0 = self.text.char_to_line(from);
+        // hits in one line as char columns; None-length mismatch lines (rare lowercase expansions) are skipped
+        let hits = |l: usize| -> Vec<usize> {
+            let lc: Vec<char> = self.text.line(l).chars().flat_map(|c| c.to_lowercase()).collect();
+            if lc.len() != self.text.line(l).len_chars() || lc.len() < n { return vec![]; }
+            (0..=lc.len() - n).filter(|&p| lc[p..p + n] == nd[..]).collect()
+        };
+        for step in 0..=total {
+            let l = if forward { (l0 + step) % total } else { (l0 + total - step % total) % total };
+            let base = self.text.line_to_char(l);
+            let hs = hits(l);
+            let ok = |p: usize| if step == 0 { if forward { p >= from } else { p < from } } else if step == total { if forward { p < from } else { p >= from } } else { true };
+            let mut it = hs.into_iter().map(|p| base + p).filter(|&p| ok(p));
+            let pick = if forward { it.next() } else { it.last() };
+            if let Some(p) = pick { return Some((p, p + n)); }
         }
+        None
     }
-
     pub fn goto_line(&mut self, line: usize) {
         let p = self.idx(line.saturating_sub(1), 0);
         self.cursors = vec![Cursor::at(p)];
@@ -683,43 +689,167 @@ mod tests {
     }
 }
 
-/// above this size a file is split at line ends and the pieces are turned into ropes on all cores
-const PAR_MIN: usize = 4 << 20;
+// ------------------------------------------------------------------ lazy, streaming load of big files
 
-fn parse_parallel(s: &str) -> (Rope, bool) {
-    let n = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(4).min(16);
-    let bytes = s.as_bytes();
-    let mut cuts = vec![0usize];
-    for k in 1..n {
-        let mut p = (bytes.len() * k / n).max(*cuts.last().unwrap());
-        while p < bytes.len() && bytes[p - 1] != b'\n' { p += 1; }   // '\n' is ASCII, so this is always a char boundary
-        cuts.push(p.min(bytes.len()));
+/// files above this size open lazily: the first screen at once, the rest is read by all cores in the background
+pub const LAZY_MIN: u64 = 8 << 20;
+/// size of the part loaded before the first paint
+const HEAD: usize = 2 << 20;
+/// each worker reads its share in pieces of this size, so memory use is the text itself plus a little
+const SUB: usize = 16 << 20;
+
+pub struct Loader {
+    rx: std::sync::mpsc::Receiver<(Rope, bool)>,
+    done: std::sync::Arc<std::sync::atomic::AtomicU64>,
+    total: u64,
+}
+
+#[cfg(unix)]
+fn read_at(f: &std::fs::File, buf: &mut [u8], off: u64) -> std::io::Result<usize> { std::os::unix::fs::FileExt::read_at(f, buf, off) }
+#[cfg(windows)]
+fn read_at(f: &std::fs::File, buf: &mut [u8], off: u64) -> std::io::Result<usize> { std::os::windows::fs::FileExt::seek_read(f, buf, off) }
+
+fn read_exact_at(f: &std::fs::File, mut buf: &mut [u8], mut off: u64) -> std::io::Result<()> {
+    while !buf.is_empty() {
+        let n = read_at(f, buf, off)?;
+        if n == 0 { return Err(std::io::ErrorKind::UnexpectedEof.into()); }
+        buf = &mut buf[n..]; off += n as u64;
     }
-    cuts.push(bytes.len());
-    let parts: Vec<(Rope, bool)> = std::thread::scope(|sc| {
-        let hs: Vec<_> = cuts.windows(2).map(|w| {
-            let piece = &s[w[0]..w[1]];
-            sc.spawn(move || {
-                if piece.contains("\r\n") { (Rope::from_str(&piece.replace("\r\n", "\n")), true) } else { (Rope::from_str(piece), false) }
-            })
-        }).collect();
-        hs.into_iter().map(|h| h.join().unwrap()).collect()
-    });
+    Ok(())
+}
+
+/// first byte after the next '\n' at or after `from` (or the end of the file)
+fn next_line_start(f: &std::fs::File, from: u64, size: u64) -> u64 {
+    let mut pos = from;
+    let mut blk = vec![0u8; 64 << 10];
+    while pos < size {
+        let n = ((size - pos) as usize).min(blk.len());
+        if read_exact_at(f, &mut blk[..n], pos).is_err() { return size; }
+        if let Some(i) = blk[..n].iter().position(|&c| c == b'\n') { return pos + i as u64 + 1; }
+        pos += n as u64;
+    }
+    size
+}
+
+fn push_piece(rope: &mut Rope, crlf: &mut bool, bytes: &[u8]) {
+    let s = String::from_utf8_lossy(bytes);
+    if s.contains("\r\n") { *crlf = true; rope.append(Rope::from_str(&s.replace("\r\n", "\n"))); } else { rope.append(Rope::from_str(&s)); }
+}
+
+/// bytes [a, b) (both on line starts) as a rope
+fn load_range(f: &std::fs::File, a: u64, b: u64, sub: usize, done: &std::sync::atomic::AtomicU64) -> (Rope, bool) {
     let mut rope = Rope::new();
     let mut crlf = false;
-    for (r, c) in parts { rope.append(r); crlf |= c; }
+    let mut carry: Vec<u8> = vec![];
+    let mut pos = a;
+    while pos < b || !carry.is_empty() {
+        let want = ((b - pos) as usize).min(sub);
+        let mut buf = std::mem::take(&mut carry);
+        let old = buf.len();
+        buf.resize(old + want, 0);
+        if read_exact_at(f, &mut buf[old..], pos).is_err() { break; }
+        pos += want as u64;
+        let cut = if pos >= b { buf.len() } else {
+            match buf.iter().rposition(|&c| c == b'\n') { Some(i) => i + 1, None => { carry = buf; continue; } }
+        };
+        carry = buf.split_off(cut);
+        push_piece(&mut rope, &mut crlf, &buf);
+        done.fetch_add(buf.len() as u64, std::sync::atomic::Ordering::Relaxed);
+    }
     (rope, crlf)
+}
+
+impl Buffer {
+    /// Open a file. Small ones are read whole; big ones (>= `lazy_min`) show their first piece immediately while
+    /// the rest streams in on all cores. Memory use is about the size of the text, not twice.
+    pub fn open_with(path: &std::path::Path, lazy_min: u64, head: usize, sub: usize) -> std::io::Result<Self> {
+        let f = std::fs::File::open(path)?;
+        let size = f.metadata()?.len();
+        let mut b = Buffer::new();
+        b.path = Some(path.to_path_buf());
+        if size < lazy_min {
+            let mut bytes = vec![0u8; size as usize];
+            read_exact_at(&f, &mut bytes, 0)?;
+            let mut crlf = false;
+            push_piece(&mut b.text, &mut crlf, &bytes);
+            b.crlf = crlf;
+            return Ok(b);
+        }
+        let cut = next_line_start(&f, head as u64, size);
+        let done = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
+        let (h, c) = load_range(&f, 0, cut, sub, &done);
+        b.text = h; b.crlf = c;
+        let (tx, rx) = std::sync::mpsc::channel();
+        let done2 = done.clone();
+        std::thread::spawn(move || {
+            let n = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(4).clamp(1, 16);
+            let span = size - cut;
+            let mut cuts = vec![cut];
+            for k in 1..n {
+                let nominal = cut + span * k as u64 / n as u64;
+                let last = *cuts.last().unwrap();
+                cuts.push(if nominal <= last { last } else { next_line_start(&f, nominal - 1, size).max(last) });
+            }
+            cuts.push(size);
+            let parts: Vec<(Rope, bool)> = std::thread::scope(|sc| {
+                let hs: Vec<_> = cuts.windows(2).map(|w| { let (f, d) = (&f, &done2); let (a, e) = (w[0], w[1]); sc.spawn(move || load_range(f, a, e, sub, d)) }).collect();
+                hs.into_iter().map(|h| h.join().unwrap_or((Rope::new(), false))).collect()
+            });
+            let mut rope = Rope::new();
+            let mut crlf = false;
+            for (r, c) in parts { rope.append(r); crlf |= c; }
+            let _ = tx.send((rope, crlf));
+        });
+        b.loading = Some(Loader { rx, done, total: size - cut });
+        Ok(b)
+    }
+
+    pub fn open(path: &std::path::Path) -> std::io::Result<Self> { Buffer::open_with(path, LAZY_MIN, HEAD, SUB) }
+
+    /// 0..=100 while the rest of a big file is still streaming in
+    pub fn load_pct(&self) -> Option<u8> {
+        self.loading.as_ref().map(|l| (l.done.load(std::sync::atomic::Ordering::Relaxed) * 100 / l.total.max(1)).min(99) as u8)
+    }
+
+    /// take the finished tail if it is ready; true when something changed
+    pub fn poll_load(&mut self) -> bool {
+        let got = match &self.loading { Some(l) => l.rx.try_recv().ok(), None => None };
+        match got { Some(t) => { self.attach_tail(t); true } None => false }
+    }
+
+    /// wait for the rest of the file (before any edit, save, or jump to the end)
+    pub fn ensure_loaded(&mut self) {
+        let got = match &self.loading { Some(l) => l.rx.recv().ok(), None => return };
+        match got { Some(t) => self.attach_tail(t), None => self.loading = None }
+    }
+
+    fn attach_tail(&mut self, (tail, crlf): (Rope, bool)) {
+        self.text.append(tail);
+        self.crlf |= crlf;
+        self.loading = None;
+        self.version += 1;
+    }
 }
 
 #[cfg(test)]
 mod big_tests {
     use super::*;
     #[test]
-    fn parallel_parse_matches_plain() {
-        let s: String = (0..400_000).map(|i| format!("line {} żółw\r\n", i)).collect();
-        assert!(s.len() > PAR_MIN);
-        let (r, crlf) = parse_parallel(&s);
-        assert!(crlf);
-        assert_eq!(r.to_string(), s.replace("\r\n", "\n"));
+    fn lazy_load_matches_plain() {
+        let dir = std::env::temp_dir().join(format!("frost-lazy-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let p = dir.join("big.txt");
+        let s: String = (0..30_000).map(|i| if i % 3 == 0 { format!("line {} żółw\r\n", i) } else { format!("x{}\n", i) }).collect();
+        std::fs::write(&p, &s).unwrap();
+        // tiny thresholds so the lazy path, several workers and many sub-pieces are all used
+        let mut b = Buffer::open_with(&p, 1000, 5000, 4096).unwrap();
+        assert!(b.loading.is_some());
+        b.ensure_loaded();
+        assert!(b.loading.is_none());
+        assert!(b.crlf);
+        assert_eq!(b.text.to_string(), s.replace("\r\n", "\n"));
+        let plain = Buffer::open_with(&p, u64::MAX, 0, 0).unwrap();
+        assert_eq!(plain.text.to_string(), b.text.to_string());
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
