@@ -16,6 +16,36 @@ impl Cursor {
     pub fn has_sel(&self) -> bool { self.head != self.anchor }
 }
 
+/// One undo step stored compactly: replace `del` chars at `start` by `ins`.
+#[derive(serde::Serialize, serde::Deserialize, Clone, Debug, PartialEq)]
+pub struct Delta { pub start: usize, pub del: usize, pub ins: String }
+
+/// The whole undo/redo history in a form that survives a restart: the oldest text plus the steps after it.
+#[derive(serde::Serialize, serde::Deserialize, Clone, Debug, PartialEq)]
+pub struct History { pub base: String, pub steps: Vec<Delta>, pub current: usize }
+
+/// the single replacement that turns `a` into `b` (common head and tail trimmed)
+pub fn delta(a: &str, b: &str) -> Delta {
+    let (ab, bb) = (a.as_bytes(), b.as_bytes());
+    let mut p = ab.iter().zip(bb).take_while(|(x, y)| x == y).count();
+    while p > 0 && !(a.is_char_boundary(p) && b.is_char_boundary(p)) { p -= 1; }
+    let max = ab.len().min(bb.len()) - p;
+    let mut s = ab.iter().rev().zip(bb.iter().rev()).take(max).take_while(|(x, y)| x == y).count();
+    while s > 0 && !(a.is_char_boundary(ab.len() - s) && b.is_char_boundary(bb.len() - s)) { s -= 1; }
+    Delta { start: a[..p].chars().count(), del: a[p..ab.len() - s].chars().count(), ins: b[p..bb.len() - s].to_string() }
+}
+
+fn apply(r: &mut Rope, d: &Delta) {
+    let n = r.len_chars();
+    let s = d.start.min(n);
+    r.remove(s..(s + d.del).min(n));
+    r.insert(s, &d.ins);
+}
+
+/// history is only kept on disk for texts up to this size and this many steps
+const HIST_MAX_CHARS: usize = 4 << 20;
+const HIST_MAX_STEPS: usize = 50_000;
+
 #[derive(Clone)]
 struct Snap { text: Rope, cursors: Vec<Cursor> }
 
@@ -155,6 +185,31 @@ impl Buffer {
             if out.len() > 400 { break; }
         }
         out
+    }
+
+    /// The full history for the session file, or None when there is none or it is too big to be worth saving.
+    pub fn history(&self) -> Option<History> {
+        if self.loading.is_some() || self.undo.is_empty() && self.redo.is_empty() { return None; }
+        if self.len() > HIST_MAX_CHARS || self.undo.len() + self.redo.len() > HIST_MAX_STEPS { return None; }
+        let mut texts: Vec<String> = self.undo.iter().map(|s| s.text.to_string()).collect();
+        texts.push(self.text.to_string());
+        texts.extend(self.redo.iter().rev().map(|s| s.text.to_string()));
+        let steps = texts.windows(2).map(|w| delta(&w[0], &w[1])).collect();
+        Some(History { base: texts.swap_remove(0), steps, current: self.undo.len() })
+    }
+
+    /// Rebuild undo/redo from a saved history. Refuses (and changes nothing) when it does not end in the text we have now.
+    pub fn set_history(&mut self, h: &History) -> bool {
+        if self.loading.is_some() || h.current > h.steps.len() { return false; }
+        let mut cur = Rope::from_str(&h.base);
+        let mut ropes = vec![cur.clone()];
+        let mut ends = vec![0usize];
+        for d in &h.steps { apply(&mut cur, d); ends.push(d.start + d.ins.chars().count()); ropes.push(cur.clone()); }
+        if ropes[h.current] != self.text { return false; }
+        let snap = |i: usize| Snap { text: ropes[i].clone(), cursors: vec![Cursor::at(ends[i].min(ropes[i].len_chars()))] };
+        self.undo = (0..h.current).map(snap).collect();
+        self.redo = (h.current + 1..ropes.len()).rev().map(snap).collect();
+        true
     }
 
     pub fn break_undo(&mut self) { self.last_kind = ""; }
@@ -871,6 +926,47 @@ impl Buffer {
         self.crlf |= crlf;
         self.loading = None;
         self.version += 1;
+    }
+}
+
+#[cfg(test)]
+mod history_tests {
+    use super::*;
+    #[test]
+    fn delta_roundtrip_with_unicode() {
+        for (a, b) in [("abc", "abXc"), ("żółw", "żołw"), ("", "x"), ("x", ""), ("same", "same"), ("aXXb", "ab")] {
+            let d = delta(a, b);
+            let mut r = Rope::from_str(a);
+            apply(&mut r, &d);
+            assert_eq!(r.to_string(), b, "{a:?} -> {b:?}");
+        }
+    }
+    #[test]
+    fn history_survives_a_save_and_restore() {
+        let mut x = Buffer::from_text("", None);
+        for w in ["one ", "two ", "three"] { x.insert(w); x.break_undo(); }
+        x.undo();
+        let h = x.history().unwrap();
+        let json = serde_json::to_string(&h).unwrap();
+        let h2: History = serde_json::from_str(&json).unwrap();
+        let mut y = Buffer::from_text(&x.contents(), None);
+        assert!(y.set_history(&h2));
+        assert_eq!(y.contents(), "one two ");
+        y.redo();
+        assert_eq!(y.contents(), "one two three");
+        y.undo(); y.undo(); y.undo(); y.undo();
+        assert_eq!(y.contents(), "");
+        y.undo();
+        assert_eq!(y.contents(), "");
+    }
+    #[test]
+    fn history_for_other_text_is_refused() {
+        let mut x = Buffer::from_text("", None);
+        x.insert("abc");
+        let h = x.history().unwrap();
+        let mut y = Buffer::from_text("different", None);
+        assert!(!y.set_history(&h));
+        assert_eq!(y.contents(), "different");
     }
 }
 

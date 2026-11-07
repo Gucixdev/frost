@@ -173,20 +173,21 @@ impl App {
     }
 
     // ---------------------------------------------------------------- sessions
-    pub fn snapshot(&mut self) -> Session {
+    pub fn snapshot(&mut self, with_history: bool) -> Session {
         let hl = &self.hl;
         Session {
             active: self.active.min(self.tabs.iter().filter(|b| b.title.is_none()).count().saturating_sub(1)),
-            tabs: self.tabs.iter().filter(|b| b.title.is_none()).map(|b| Self::tab_state(hl, b)).collect(),
+            tabs: self.tabs.iter().filter(|b| b.title.is_none()).map(|b| Self::tab_state(hl, b, with_history)).collect(),
             closed: self.closed.clone(),
         }
     }
 
-    fn tab_state(hl: &Highlighter, b: &Buffer) -> TabState {
+    fn tab_state(hl: &Highlighter, b: &Buffer, with_history: bool) -> TabState {
         let (l, c) = b.pos(b.primary().head);
         TabState { path: b.path.as_ref().map(|p| p.to_string_lossy().into_owned()),
                    unsaved: if b.modified || b.path.is_none() { Some(b.contents()) } else { None },
-                   cursor_line: l, cursor_col: c, scroll: b.scroll, syntax: Some(hl.name_of(b.syntax)) }
+                   cursor_line: l, cursor_col: c, scroll: b.scroll, syntax: Some(hl.name_of(b.syntax)),
+                   history: if with_history { b.history() } else { None } }
     }
 
     fn tab_from_state(&mut self, t: &TabState) -> Option<Buffer> {
@@ -199,6 +200,7 @@ impl App {
         b.syntax = t.syntax.as_deref().and_then(|n| self.hl.index_of(n)).unwrap_or_else(|| self.hl.detect(t.path.as_deref(), &first));
         b.set_cursor_line_col(t.cursor_line, t.cursor_col);
         b.scroll = t.scroll;
+        if let Some(h) = &t.history { b.set_history(h); }
         Some(b)
     }
 
@@ -206,7 +208,7 @@ impl App {
     fn remember_closed(&mut self, i: usize) {
         let b = &self.tabs[i];
         if b.path.is_none() && b.len() == 0 { return; }
-        let st = Self::tab_state(&self.hl, b);
+        let st = Self::tab_state(&self.hl, b, true);
         self.closed.retain(|c| !(c.path.is_some() && c.path == st.path));
         self.closed.push(st);
         if self.closed.len() > 30 { self.closed.remove(0); }
@@ -227,8 +229,9 @@ impl App {
         busy
     }
 
-    pub fn save_session(&mut self) {
-        let s = self.snapshot();
+    /// `full` also writes the undo history (on exit); the 30 s autosave leaves it out because computing it costs time
+    pub fn save_session(&mut self, full: bool) {
+        let s = self.snapshot(full);
         if let Err(e) = session::save(&s) { eprintln!("frost: cannot save session: {e}"); }
     }
 
@@ -508,7 +511,7 @@ impl App {
             }
             PromptKind::ReplaceWith => { let n = self.buf().replace_all(&p.aux, &p.input); self.msg = format!("{n} replaced"); }
             PromptKind::SaveSession => {
-                let s = self.snapshot();
+                let s = self.snapshot(true);
                 self.msg = match session::save_named(&self.session_dir, p.input.trim(), &s) { Ok(()) => format!("session '{}' saved", p.input.trim()), Err(e) => format!("session: {e}") };
             }
         }

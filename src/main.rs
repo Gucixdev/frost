@@ -59,12 +59,12 @@ fn main() -> io::Result<()> {
                 }
             }
             // the session is also kept while running, so a crash or a killed terminal loses at most 30 s
-            if last_save.elapsed() > Duration::from_secs(30) { app.save_session(); last_save = std::time::Instant::now(); }
+            if last_save.elapsed() > Duration::from_secs(30) { app.save_session(false); last_save = std::time::Instant::now(); }
         }
         Ok(())
     })();
 
-    app.save_session();
+    app.save_session(true);
     disable_raw_mode()?;
     execute!(term.backend_mut(), DisableMouseCapture, LeaveAlternateScreen)?;
     term.show_cursor()?;

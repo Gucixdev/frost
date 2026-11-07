@@ -12,6 +12,9 @@ pub struct TabState {
     pub cursor_col: usize,
     pub scroll: usize,
     pub syntax: Option<String>,
+    /// undo/redo history (kept across restarts so there is always history)
+    #[serde(default)]
+    pub history: Option<crate::buffer::History>,
 }
 
 #[derive(Serialize, Deserialize, Clone, Default, Debug, PartialEq)]
@@ -139,6 +142,7 @@ mod tests {
                 cursor_col: 0,
                 scroll: 0,
                 syntax: None,
+                history: None,
             }],
             active: 0,
         };
@@ -171,6 +175,7 @@ mod tests {
                 cursor_col: 0,
                 scroll: 0,
                 syntax: None,
+                history: None,
             }],
             active: 0,
         };
