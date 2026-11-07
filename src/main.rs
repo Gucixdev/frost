@@ -3,6 +3,7 @@ mod app;
 mod buffer;
 mod config;
 mod dict;
+mod diff;
 mod highlight;
 mod session;
 mod ui;

@@ -14,12 +14,12 @@ pub enum Action {
     New, Open, Save, SaveAs, Close, NextTab, PrevTab, Quit,
     Undo, Redo, Cut, Copy, Paste, SelectAll, DuplicateLine, DeleteLine, Indent, Unindent,
     Find, FindNext, FindPrev, Replace, Goto, NextOccurrence, CursorUp, CursorDown, OneCursor,
-    Language, Define, Palette, ReopenClosed, ClosedTabs, SaveSession, LoadSession, ToggleLineNumbers, Help,
+    Language, Define, DiffDisk, DiffTab, Palette, ReopenClosed, ClosedTabs, SaveSession, LoadSession, ToggleLineNumbers, Help,
 }
 
 pub const MENUS: &[(&str, &[(&str, &str, Action)])] = &[
     ("File", &[("New", "Ctrl-N", Action::New), ("Open...", "Ctrl-O", Action::Open), ("Save", "Ctrl-S", Action::Save), ("Save As...", "Ctrl-Shift-S", Action::SaveAs),
-               ("Close tab", "Ctrl-W", Action::Close), ("Reopen closed tab", "Ctrl-T", Action::ReopenClosed), ("Closed tabs...", "", Action::ClosedTabs), ("Save session as...", "", Action::SaveSession), ("Load session...", "", Action::LoadSession), ("Quit", "Ctrl-Q", Action::Quit)]),
+               ("Close tab", "Ctrl-W", Action::Close), ("Diff with file on disk", "", Action::DiffDisk), ("Diff with another tab...", "", Action::DiffTab), ("Reopen closed tab", "Ctrl-T", Action::ReopenClosed), ("Closed tabs...", "", Action::ClosedTabs), ("Save session as...", "", Action::SaveSession), ("Load session...", "", Action::LoadSession), ("Quit", "Ctrl-Q", Action::Quit)]),
     ("Edit", &[("Undo", "Ctrl-Z", Action::Undo), ("Redo", "Ctrl-Y", Action::Redo), ("Cut", "Ctrl-X", Action::Cut), ("Copy", "Ctrl-C", Action::Copy), ("Paste", "Ctrl-V", Action::Paste),
                ("Select all", "Ctrl-A", Action::SelectAll), ("Duplicate line", "Ctrl-Shift-D", Action::DuplicateLine), ("Delete line", "Ctrl-K", Action::DeleteLine),
                ("Define word", "F2", Action::Define), ("Indent", "Tab", Action::Indent), ("Unindent", "Shift-Tab", Action::Unindent)]),
@@ -37,7 +37,7 @@ const PALETTE: &[(&str, Action)] = &[
     ("Undo", Action::Undo), ("Redo", Action::Redo), ("Select all", Action::SelectAll), ("Duplicate line", Action::DuplicateLine), ("Delete line", Action::DeleteLine),
     ("Find", Action::Find), ("Replace all", Action::Replace), ("Go to line", Action::Goto), ("Add next occurrence (multi-cursor)", Action::NextOccurrence),
     ("Add cursor above", Action::CursorUp), ("Add cursor below", Action::CursorDown), ("Single cursor", Action::OneCursor), ("Choose language", Action::Language),
-    ("Define word", Action::Define), ("Reopen closed tab", Action::ReopenClosed), ("Closed tabs", Action::ClosedTabs), ("Save session as", Action::SaveSession), ("Load session", Action::LoadSession), ("Toggle line numbers", Action::ToggleLineNumbers), ("Keys", Action::Help),
+    ("Define word", Action::Define), ("Diff with file on disk", Action::DiffDisk), ("Diff with another tab", Action::DiffTab), ("Reopen closed tab", Action::ReopenClosed), ("Closed tabs", Action::ClosedTabs), ("Save session as", Action::SaveSession), ("Load session", Action::LoadSession), ("Toggle line numbers", Action::ToggleLineNumbers), ("Keys", Action::Help),
 ];
 
 pub const HELP: &str = "Ctrl-S save  Ctrl-O open  Ctrl-N new  Ctrl-W close  Ctrl-Q quit | Ctrl-Z/Y undo/redo  Ctrl-X/C/V  Ctrl-A all  Ctrl-K del line | \
@@ -50,7 +50,7 @@ pub enum PromptKind { Open, SaveAs, Find, Goto, ReplaceFind, ReplaceWith, SaveSe
 pub struct Prompt { pub kind: PromptKind, pub label: String, pub input: String, pub aux: String }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub enum PickerKind { Palette, Language, Sessions, Closed }
+pub enum PickerKind { Palette, Language, Sessions, Closed, DiffTab }
 
 pub struct Picker { pub kind: PickerKind, pub filter: String, pub items: Vec<String>, pub sel: usize }
 
@@ -176,8 +176,8 @@ impl App {
     pub fn snapshot(&mut self) -> Session {
         let hl = &self.hl;
         Session {
-            active: self.active,
-            tabs: self.tabs.iter().map(|b| Self::tab_state(hl, b)).collect(),
+            active: self.active.min(self.tabs.iter().filter(|b| b.title.is_none()).count().saturating_sub(1)),
+            tabs: self.tabs.iter().filter(|b| b.title.is_none()).map(|b| Self::tab_state(hl, b)).collect(),
             closed: self.closed.clone(),
         }
     }
@@ -255,6 +255,21 @@ impl App {
                 self.msg = if w.is_empty() { "put the caret on a word".into() } else {
                     match self.dict.define(&w) { Some(m) => format!("{w}: {m}"), None => format!("{w}: no entry (add it to ~/.config/frost/dictionary.txt)") }
                 };
+            }
+            Action::DiffDisk => {
+                let b = self.buf();
+                let Some(p) = b.path.clone() else { self.msg = "save the file first - nothing on disk to compare with".into(); return; };
+                if b.len() > 64 << 20 { self.msg = "diff is limited to files under 64 MB".into(); return; }
+                let disk = match std::fs::read(&p) { Ok(x) => String::from_utf8_lossy(&x).replace("\r\n", "\n"), Err(e) => { self.msg = format!("cannot read {}: {e}", p.display()); return; } };
+                let name = p.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+                let now = b.contents();
+                self.show_diff(format!("diff: {name}"), &format!("{name} (disk)"), &disk, &format!("{name} (editor)"), &now);
+            }
+            Action::DiffTab => {
+                if self.tabs.len() < 2 { self.msg = "open a second tab to compare with".into(); } else {
+                    let items = self.tabs.iter().enumerate().filter(|(i, _)| *i != self.active).map(|(i, t)| format!("{}. {}", i + 1, t.name())).collect();
+                    self.picker = Some(Picker { kind: PickerKind::DiffTab, filter: String::new(), items, sel: 0 });
+                }
             }
             Action::Close => self.close_active(false),
             Action::ReopenClosed => match self.closed.pop() {
@@ -355,6 +370,16 @@ impl App {
         let typing = matches!(k.code, KeyCode::Char(_) | KeyCode::Backspace) && !k.modifiers.intersects(KeyModifiers::CONTROL | KeyModifiers::ALT);
         self.on_key_inner(k);
         if typing { self.update_suggest(); } else { self.suggest = None; }
+    }
+
+    fn show_diff(&mut self, title: String, an: &str, at: &str, bn: &str, bt: &str) {
+        let d = crate::diff::unified(an, at, bn, bt);
+        if d.is_empty() { self.msg = "no differences".into(); return; }
+        let mut b = Buffer::from_text(&d, None);
+        b.title = Some(title);
+        b.syntax = self.hl.index_of("Diff").unwrap_or(0);
+        self.tabs.push(b);
+        self.active = self.tabs.len() - 1;
     }
 
     fn update_suggest(&mut self) {
@@ -512,6 +537,16 @@ impl App {
         match kind {
             PickerKind::Palette => if let Some(a) = PALETTE.iter().find(|p| p.0 == item) { self.run(a.1); },
             PickerKind::Language => if let Some(i) = self.hl.index_of(item) { self.buf().syntax = i; self.hl.invalidate_from(0); },
+            PickerKind::DiffTab => {
+                let n: usize = item.split('.').next().and_then(|x| x.parse().ok()).unwrap_or(0);
+                if n >= 1 && n <= self.tabs.len() && n - 1 != self.active {
+                    let (a, b) = (&self.tabs[n - 1], &self.tabs[self.active]);
+                    if a.len() + b.len() > 64 << 20 { self.msg = "diff is limited to 64 MB".into(); } else {
+                        let (an, bn, at, bt) = (a.name(), b.name(), a.contents(), b.contents());
+                        self.show_diff(format!("diff: {an} / {bn}"), &an, &at, &bn, &bt);
+                    }
+                }
+            }
             PickerKind::Closed => {
                 let n: usize = item.split('.').next().and_then(|x| x.parse().ok()).unwrap_or(0);
                 if n >= 1 && n <= self.closed.len() {

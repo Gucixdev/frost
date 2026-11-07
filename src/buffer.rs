@@ -39,6 +39,8 @@ pub struct Buffer {
     pub first_changed: usize,
     pub id: u64,
     pub loading: Option<Loader>,
+    /// shown instead of the file name (diff views)
+    pub title: Option<String>,
 }
 
 fn is_word(c: char) -> bool { c.is_alphanumeric() || c == '_' }
@@ -46,7 +48,7 @@ fn is_word(c: char) -> bool { c.is_alphanumeric() || c == '_' }
 impl Buffer {
     pub fn new() -> Self {
         Buffer { text: Rope::new(), path: None, modified: false, crlf: false, cursors: vec![Cursor::at(0)], syntax: 0, scroll: 0, hscroll: 0,
-                 undo: vec![], redo: vec![], last_kind: "", version: 0, first_changed: usize::MAX, loading: None,
+                 undo: vec![], redo: vec![], last_kind: "", version: 0, first_changed: usize::MAX, loading: None, title: None,
                  id: { static N: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1); N.fetch_add(1, std::sync::atomic::Ordering::Relaxed) } }
     }
 
@@ -102,6 +104,7 @@ impl Buffer {
     }
     pub fn primary(&self) -> Cursor { *self.cursors.last().unwrap_or(&Cursor::at(0)) }
     pub fn name(&self) -> String {
+        if let Some(t) = &self.title { return t.clone(); }
         self.path.as_ref().and_then(|p| p.file_name()).map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| "untitled".into())
     }
 

@@ -6,6 +6,7 @@ description = "small terminal editor: fresh-like UI, micro-like keys, CUA + mous
 license = "MIT"
 
 [dependencies]
+similar = "2"
 mlua = { version = "0.10", features = ["lua54", "vendored"] }
 crossterm = "0.28"
 ratatui = "0.29"
