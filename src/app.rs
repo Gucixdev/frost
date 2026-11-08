@@ -90,6 +90,9 @@ pub struct App {
     pub last_find: String,
     clip: String,
     dragging: bool,
+    wheel_at: Option<std::time::Instant>,
+    wheel_streak: u32,
+    follow_sig: (usize, usize, usize),
     clicks: (Instant, u16, u16, u8),
     confirm_quit: bool,
     pub session_dir: PathBuf,
@@ -139,7 +142,7 @@ impl App {
         let cfg = crate::config::load();   // first: the theme decides which syntax colours the highlighter uses
         let hl = Highlighter::new();
         let mut app = App { tabs: vec![], active: 0, hl, prompt: None, picker: None, menu: None, msg: String::new(), quit: false, line_numbers: true,
-                            layout: Layout::default(), show_help: false, last_find: String::new(), clip: String::new(), dragging: false,
+                            layout: Layout::default(), show_help: false, last_find: String::new(), clip: String::new(), dragging: false, wheel_at: None, wheel_streak: 0, follow_sig: (usize::MAX, 0, 0),
                             clicks: (Instant::now(), 0, 0, 0), confirm_quit: false, session_dir: session::session_dir(), hl_key: (0, 0), closed: vec![], hover_row: None, keymap: Default::default(), dict: crate::dict::Dict::load(None), suggest: None, persist: true, hist_written: Default::default() };
         app.line_numbers = cfg.line_numbers;
         app.keymap = cfg.keys.iter().filter_map(|(k, v)| action_by_name(v).map(|a| (k.clone(), a))).collect();
@@ -680,14 +683,31 @@ impl App {
                     }
                 }
             }
-            MouseEventKind::ScrollUp => { let b = self.buf(); b.scroll = b.scroll.saturating_sub(3); }
-            MouseEventKind::ScrollDown => { let b = self.buf(); b.scroll = (b.scroll + 3).min(b.lines().saturating_sub(1)); }
+            MouseEventKind::ScrollUp | MouseEventKind::ScrollDown | MouseEventKind::ScrollLeft | MouseEventKind::ScrollRight => {
+                // the faster the wheel turns, the further each notch goes (3 lines, up to 24); Ctrl = a page
+                let now = std::time::Instant::now();
+                self.wheel_streak = match self.wheel_at { Some(t) if now.duration_since(t).as_millis() < 120 => (self.wheel_streak + 1).min(21), _ => 0 };
+                self.wheel_at = Some(now);
+                let page = self.layout.text.height.max(1) as usize;
+                let mut step = 3 * (1 + self.wheel_streak as usize / 3);
+                if m.modifiers.contains(KeyModifiers::CONTROL) { step = page; }
+                let sideways = matches!(m.kind, MouseEventKind::ScrollLeft | MouseEventKind::ScrollRight) || m.modifiers.contains(KeyModifiers::SHIFT);
+                let up = matches!(m.kind, MouseEventKind::ScrollUp | MouseEventKind::ScrollLeft);
+                let b = self.buf();
+                if sideways { b.hscroll = if up { b.hscroll.saturating_sub(step) } else { b.hscroll + step }; }
+                else if up { b.scroll = b.scroll.saturating_sub(step); }
+                else { b.scroll = (b.scroll + step).min(b.lines().saturating_sub(1)); }
+            }
             _ => {}
         }
     }
 
     /// keep the primary cursor on screen
     pub fn scroll_to_cursor(&mut self) {
+        // only follow the cursor when it (or the text) moved, otherwise the wheel could never scroll away from it
+        let sig = { let a = self.active; let b = self.buf(); (a, b.primary().head, b.text.len_chars()) };
+        if sig == self.follow_sig { return; }
+        self.follow_sig = sig;
         let h = self.layout.text.height.max(1) as usize;
         let w = self.layout.text.width.saturating_sub(self.layout.gutter).max(1) as usize;
         let b = self.buf();
