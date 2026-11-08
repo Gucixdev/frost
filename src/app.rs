@@ -145,10 +145,11 @@ impl App {
         app.keymap = cfg.keys.iter().filter_map(|(k, v)| action_by_name(v).map(|a| (k.clone(), a))).collect();
         if cfg.dictionary.is_some() { app.dict = crate::dict::Dict::load(cfg.dictionary.clone()); }
         if let Some(e) = cfg.error { app.msg = e; }
-        // `frost` alone brings the last session back (Notepad++ style). `frost FILE...` is an editor call (git, nnn, $EDITOR):
-        // it opens just those files and leaves the saved session alone. `file:12` and `+12 file` jump to a line.
-        app.persist = files.is_empty();
-        if app.persist { app.restore(&session::load()); }
+        // Notepad++ model: the session is ALWAYS kept. Whatever is open (saved files, unsaved edits, untitled tabs) comes back on the
+        // next start, and closing the editor never asks and never loses work. `frost FILE...` (git, nnn, $EDITOR) restores the
+        // session too and then opens/activates FILE on top of it. `file:12` and `+12 file` jump to a line.
+        app.persist = true;
+        app.restore(&session::load());
         let mut line = 0usize;
         for f in files {
             if let Some(n) = f.strip_prefix('+').and_then(|n| n.parse::<usize>().ok()) { line = n; continue; }
@@ -259,6 +260,16 @@ impl App {
             let keep = self.tabs.iter().map(|b| b.hid.clone()).chain(self.closed.iter().map(|c| c.hid.clone())).collect();
             crate::history_store::prune(&self.session_dir, &keep);
         }
+    }
+
+    /// cheap fingerprint of everything the periodic snapshot would store (no text copies): when it is unchanged, nothing is written
+    pub fn snapshot_sig(&self) -> u64 {
+        use std::hash::{Hash, Hasher};
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        self.active.hash(&mut h);
+        for b in &self.tabs { (b.id, b.hist_gen, b.modified, b.path.as_ref()).hash(&mut h); }
+        self.closed.len().hash(&mut h);
+        h.finish()
     }
 
     pub fn save_session(&mut self, full: bool) {

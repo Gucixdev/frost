@@ -44,6 +44,7 @@ fn main() -> io::Result<()> {
         let _ = signal_hook::flag::register(sig, stop.clone());
     }
     let mut last_save = std::time::Instant::now();
+    let mut last_sig = app.snapshot_sig();
     let result = (|| -> io::Result<()> {
         while !app.quit && !stop.load(std::sync::atomic::Ordering::Relaxed) {
             term.draw(|f| ui::draw(f, &mut app))?;
@@ -65,8 +66,12 @@ fn main() -> io::Result<()> {
                     }
                 }
             }
-            // the session is also kept while running, so a crash or a killed terminal loses at most 30 s
-            if last_save.elapsed() > Duration::from_secs(30) { app.save_session(false); last_save = std::time::Instant::now(); }
+            // Notepad++ style snapshot: every 7 s, but only when something changed (a crash or killed terminal loses at most 7 s)
+            if last_save.elapsed() > Duration::from_secs(7) {
+                last_save = std::time::Instant::now();
+                let sig = app.snapshot_sig();
+                if sig != last_sig { app.save_session(false); last_sig = sig; }
+            }
         }
         Ok(())
     })();
