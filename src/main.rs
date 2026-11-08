@@ -9,7 +9,7 @@ mod history_store;
 mod session;
 mod ui;
 
-use crossterm::event::{self, DisableMouseCapture, EnableMouseCapture, Event, KeyEventKind};
+use crossterm::event::{self, DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture, Event, KeyEventKind};
 use crossterm::terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen};
 use crossterm::execute;
 use ratatui::backend::CrosstermBackend;
@@ -27,12 +27,12 @@ fn main() -> io::Result<()> {
 
     enable_raw_mode()?;
     let mut out = io::stdout();
-    execute!(out, EnterAlternateScreen, EnableMouseCapture)?;
+    execute!(out, EnterAlternateScreen, EnableMouseCapture, EnableBracketedPaste)?;
     // restore the terminal even when something panics
     let hook = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |p| {
         let _ = disable_raw_mode();
-        let _ = execute!(io::stdout(), DisableMouseCapture, LeaveAlternateScreen);
+        let _ = execute!(io::stdout(), DisableBracketedPaste, DisableMouseCapture, LeaveAlternateScreen);
         hook(p);
     }));
     let mut term = Terminal::new(CrosstermBackend::new(out))?;
@@ -78,7 +78,7 @@ fn main() -> io::Result<()> {
 
     app.save_session(true);
     disable_raw_mode()?;
-    execute!(term.backend_mut(), DisableMouseCapture, LeaveAlternateScreen)?;
+    execute!(term.backend_mut(), DisableBracketedPaste, DisableMouseCapture, LeaveAlternateScreen)?;
     term.show_cursor()?;
     result
 }
