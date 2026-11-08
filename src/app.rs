@@ -484,8 +484,8 @@ impl App {
             KeyCode::Esc => { self.buf().collapse(); }
             KeyCode::Left => self.buf().move_cursors(if ctrl { Move::WordLeft } else { Move::Left }, shift),
             KeyCode::Right => self.buf().move_cursors(if ctrl { Move::WordRight } else { Move::Right }, shift),
-            KeyCode::Up if ctrl => self.scroll_view(-5),
-            KeyCode::Down if ctrl => self.scroll_view(5),
+            KeyCode::Up if ctrl => for _ in 0..5 { self.buf().move_cursors(Move::Up, shift) },
+            KeyCode::Down if ctrl => for _ in 0..5 { self.buf().move_cursors(Move::Down, shift) },
             KeyCode::Up if alt => self.run(Action::CursorUp),
             KeyCode::Down if alt => self.run(Action::CursorDown),
             KeyCode::Up => self.buf().move_cursors(Move::Up, shift),

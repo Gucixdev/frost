@@ -57,7 +57,7 @@ fn tab_bar(f: &mut Frame, app: &mut App, r: Rect) {
         let w = label.chars().count() as u16;
         if x + w > r.x + r.width { break; }
         let rect = Rect::new(x, r.y, w, 1);
-        let st = if i == app.active { Style::default().bg(t.bg).fg(t.accent).add_modifier(Modifier::BOLD | Modifier::UNDERLINED) } else { Style::default().bg(t.bar).fg(idle_fg) };
+        let st = if i == app.active { Style::default().bg(t.bg).fg(t.accent).add_modifier(Modifier::BOLD) } else { Style::default().bg(t.bar).fg(idle_fg) };
         f.render_widget(Paragraph::new(label).style(st), rect);
         app.layout.tabs.push((rect, i));
         x += w + 1;
