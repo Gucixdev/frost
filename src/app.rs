@@ -484,6 +484,8 @@ impl App {
             KeyCode::Esc => { self.buf().collapse(); }
             KeyCode::Left => self.buf().move_cursors(if ctrl { Move::WordLeft } else { Move::Left }, shift),
             KeyCode::Right => self.buf().move_cursors(if ctrl { Move::WordRight } else { Move::Right }, shift),
+            KeyCode::Up if ctrl => self.scroll_view(-5),
+            KeyCode::Down if ctrl => self.scroll_view(5),
             KeyCode::Up if alt => self.run(Action::CursorUp),
             KeyCode::Down if alt => self.run(Action::CursorDown),
             KeyCode::Up => self.buf().move_cursors(Move::Up, shift),
@@ -700,6 +702,13 @@ impl App {
             }
             _ => {}
         }
+    }
+
+    /// scroll the view by `d` lines without touching the cursor (Ctrl+Up/Down)
+    pub fn scroll_view(&mut self, d: isize) {
+        let b = self.buf();
+        let last = b.lines().saturating_sub(1);
+        b.scroll = if d < 0 { b.scroll.saturating_sub((-d) as usize) } else { (b.scroll + d as usize).min(last) };
     }
 
     /// keep the primary cursor on screen

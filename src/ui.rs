@@ -47,14 +47,17 @@ fn menu_bar(f: &mut Frame, app: &mut App, r: Rect) {
 }
 
 fn tab_bar(f: &mut Frame, app: &mut App, r: Rect) {
-    f.render_widget(Block::default().style(Style::default().bg({ let t = crate::config::theme(); mix(t.bar, t.bg) })), r);
+    let t = crate::config::theme();
+    // the bar, the idle tabs and the active tab must all differ, in every theme (the terminal theme has no RGB to mix)
+    let idle_fg = if t.terminal { Color::Gray } else { t.fg };
+    f.render_widget(Block::default().style(Style::default().bg(t.bar)), r);
     let mut x = r.x;
     for (i, b) in app.tabs.iter().enumerate() {
         let label = format!(" {}{} ", b.name(), if b.modified { " ●" } else { "" });
         let w = label.chars().count() as u16;
         if x + w > r.x + r.width { break; }
         let rect = Rect::new(x, r.y, w, 1);
-        let st = if i == app.active { Style::default().bg(crate::config::theme().bg).fg(crate::config::theme().accent).add_modifier(Modifier::BOLD) } else { Style::default().bg({ let t = crate::config::theme(); mix(t.bar, t.bg) }).fg(crate::config::theme().dim) };
+        let st = if i == app.active { Style::default().bg(t.bg).fg(t.accent).add_modifier(Modifier::BOLD | Modifier::UNDERLINED) } else { Style::default().bg(t.bar).fg(idle_fg) };
         f.render_widget(Paragraph::new(label).style(st), rect);
         app.layout.tabs.push((rect, i));
         x += w + 1;
