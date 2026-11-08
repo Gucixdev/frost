@@ -243,10 +243,16 @@ impl Buffer {
         let mut ropes = vec![cur.clone()];
         let mut ends = vec![0usize];
         for d in &h.steps { apply(&mut cur, d); ends.push(d.start + d.ins.chars().count()); ropes.push(cur.clone()); }
-        if ropes[h.current] != self.text { return false; }
         let snap = |i: usize| Snap { text: ropes[i].clone(), cursors: vec![Cursor::at(ends[i].min(ropes[i].len_chars()))] };
-        self.undo = (0..h.current).map(snap).collect();
         self.hist_gen += 1;
+        if ropes[h.current] != self.text {
+            // the text moved on after the history was written (snapshot older than the text, line endings, edit on disk):
+            // keep the old states as undo steps below the live text instead of dropping the whole history
+            self.undo = (0..=h.current).map(snap).collect();
+            self.redo.clear();
+            return true;
+        }
+        self.undo = (0..h.current).map(snap).collect();
         self.redo = (h.current + 1..ropes.len()).rev().map(snap).collect();
         true
     }
@@ -1042,8 +1048,10 @@ mod history_tests {
         x.insert("abc");
         let h = x.history().unwrap();
         let mut y = Buffer::from_text("different", None);
-        assert!(!y.set_history(&h));
+        assert!(y.set_history(&h));   // kept as undo steps below the live text
         assert_eq!(y.contents(), "different");
+        y.undo();
+        assert_eq!(y.contents(), "abc");
     }
 }
 

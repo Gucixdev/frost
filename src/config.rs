@@ -14,6 +14,8 @@ pub struct Config {
     pub line_numbers: bool,
     pub keys: HashMap<String, String>,
     pub dictionary: Option<PathBuf>,
+    /// word popup while typing; off by default
+    pub autocomplete: bool,
     pub error: Option<String>,
 }
 
@@ -56,7 +58,7 @@ pub fn config_dir() -> PathBuf {
 }
 
 pub fn load() -> Config {
-    let mut cfg = Config { theme: preset("terminal"), line_numbers: true, keys: HashMap::new(), dictionary: None, error: None };
+    let mut cfg = Config { theme: preset("terminal"), line_numbers: true, keys: HashMap::new(), dictionary: None, autocomplete: false, error: None };
     let path = config_dir().join("init.lua");
     if let Ok(src) = std::fs::read_to_string(&path) {
         if let Err(e) = run(&src, &mut cfg) { cfg.error = Some(format!("init.lua: {}", e.to_string().lines().next().unwrap_or(""))); }
@@ -90,6 +92,7 @@ fn run(src: &str, cfg: &mut Config) -> mlua::Result<()> {
     if let Ok(k) = frost.get::<Table>("keys") {
         for pair in k.pairs::<String, String>().flatten() { cfg.keys.insert(pair.0.to_lowercase(), pair.1.to_lowercase()); }
     }
+    cfg.autocomplete = frost.get::<bool>("autocomplete").unwrap_or(false);
     cfg.dictionary = frost.get::<String>("dictionary").ok().map(PathBuf::from);
     Ok(())
 }
@@ -97,7 +100,7 @@ fn run(src: &str, cfg: &mut Config) -> mlua::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    fn fresh() -> Config { Config { theme: preset("terminal"), line_numbers: true, keys: HashMap::new(), dictionary: None, error: None } }
+    fn fresh() -> Config { Config { theme: preset("terminal"), line_numbers: true, keys: HashMap::new(), dictionary: None, autocomplete: false, error: None } }
 
     #[test]
     fn lua_sets_options_theme_and_keys() {

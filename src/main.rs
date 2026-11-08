@@ -17,6 +17,28 @@ use ratatui::Terminal;
 use std::io;
 use std::time::Duration;
 
+enum Wait { Ready, Timeout, Hup }
+/// wait up to `ms` for input on stdin; reports a hung-up terminal instead of letting crossterm spin on it
+#[cfg(unix)]
+fn wait_tty(ms: u64) -> Wait {
+    let mut p = libc::pollfd { fd: 0, events: libc::POLLIN, revents: 0 };
+    let r = unsafe { libc::poll(&mut p, 1, ms as i32) };
+    if r < 0 { return Wait::Timeout; }   // EINTR (a signal): the loop re-checks the stop flag
+    if p.revents & (libc::POLLHUP | libc::POLLERR | libc::POLLNVAL) != 0 { Wait::Hup }
+    else if p.revents & libc::POLLIN != 0 { Wait::Ready } else { Wait::Timeout }
+}
+#[cfg(not(unix))]
+fn wait_tty(ms: u64) -> Wait { if event::poll(Duration::from_millis(ms)).unwrap_or(false) { Wait::Ready } else { Wait::Timeout } }
+
+/// true when the terminal on stdin has hung up (crossterm would spin on read()==0 forever, leaving an orphan process)
+#[cfg(unix)]
+fn tty_hung_up() -> bool {
+    let mut p = libc::pollfd { fd: 0, events: 0, revents: 0 };
+    unsafe { libc::poll(&mut p, 1, 0) >= 0 && p.revents & (libc::POLLHUP | libc::POLLERR | libc::POLLNVAL) != 0 }
+}
+#[cfg(not(unix))]
+fn tty_hung_up() -> bool { false }
+
 fn main() -> io::Result<()> {
     let args: Vec<String> = std::env::args().skip(1).collect();
     if args.iter().any(|a| a == "-h" || a == "--help") {
@@ -47,9 +69,14 @@ fn main() -> io::Result<()> {
     let mut last_sig = app.snapshot_sig();
     let result = (|| -> io::Result<()> {
         while !app.quit && !stop.load(std::sync::atomic::Ordering::Relaxed) {
+            // the terminal is gone (closed window, dead ssh, killed multiplexer): quit instead of spinning as an orphan
+            if crossterm::terminal::size().is_err() || tty_hung_up() { break; }
             term.draw(|f| ui::draw(f, &mut app))?;
             let busy = app.tick();
-            if event::poll(Duration::from_millis(if busy { 40 } else { 500 }))? {
+            let ms = if busy { 40 } else { 500 };
+            // wait on the fd ourselves first: crossterm's poll/read never return once the terminal has hung up
+            let ready = match wait_tty(ms) { Wait::Hup => break, Wait::Timeout => false, Wait::Ready => true };
+            if ready && event::poll(Duration::from_millis(0))? {
                 match event::read()? {
                     Event::Key(k) if k.kind != KeyEventKind::Release => app.on_key(k),
                     Event::Mouse(m) => app.on_mouse(m),
@@ -57,7 +84,7 @@ fn main() -> io::Result<()> {
                     _ => {}
                 }
                 // drain what is already waiting (fast typing, pastes) before drawing again
-                while event::poll(Duration::from_millis(0))? {
+                                while !tty_hung_up() && !stop.load(std::sync::atomic::Ordering::Relaxed) && event::poll(Duration::from_millis(0))? && !tty_hung_up() {
                     match event::read()? {
                         Event::Key(k) if k.kind != KeyEventKind::Release => app.on_key(k),
                         Event::Mouse(m) => app.on_mouse(m),

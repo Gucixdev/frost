@@ -347,6 +347,7 @@ dependencies = [
  "arboard",
  "crossterm",
  "flate2",
+ "libc",
  "mlua",
  "ratatui",
  "ropey",

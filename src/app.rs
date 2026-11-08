@@ -14,7 +14,7 @@ pub enum Action {
     New, Open, Save, SaveAs, Close, NextTab, PrevTab, Quit,
     Undo, Redo, Cut, Copy, Paste, SelectAll, DuplicateLine, DeleteLine, Indent, Unindent,
     Find, FindNext, FindPrev, Replace, Goto, NextOccurrence, CursorUp, CursorDown, OneCursor,
-    Language, Define, DiffDisk, DiffTab, Palette, ReopenClosed, ClosedTabs, SaveSession, LoadSession, ToggleLineNumbers, Help,
+    Language, Define, WordJump, WordNext, WordPrev, DiffDisk, DiffTab, Palette, ReopenClosed, ClosedTabs, SaveSession, LoadSession, ToggleLineNumbers, Help,
 }
 
 pub const MENUS: &[(&str, &[(&str, &str, Action)])] = &[
@@ -22,7 +22,7 @@ pub const MENUS: &[(&str, &[(&str, &str, Action)])] = &[
                ("Close tab", "Ctrl-W", Action::Close), ("Diff with file on disk", "", Action::DiffDisk), ("Diff with another tab...", "", Action::DiffTab), ("Reopen closed tab", "Ctrl-T", Action::ReopenClosed), ("Closed tabs...", "", Action::ClosedTabs), ("Save session as...", "", Action::SaveSession), ("Load session...", "", Action::LoadSession), ("Quit", "Ctrl-Q", Action::Quit)]),
     ("Edit", &[("Undo", "Ctrl-Z", Action::Undo), ("Redo", "Ctrl-Y", Action::Redo), ("Cut", "Ctrl-X", Action::Cut), ("Copy", "Ctrl-C", Action::Copy), ("Paste", "Ctrl-V", Action::Paste),
                ("Select all", "Ctrl-A", Action::SelectAll), ("Duplicate line", "Ctrl-Shift-D", Action::DuplicateLine), ("Delete line", "Ctrl-K", Action::DeleteLine),
-               ("Define word", "F2", Action::Define), ("Indent", "Tab", Action::Indent), ("Unindent", "Shift-Tab", Action::Unindent)]),
+               ("Define word", "F2", Action::Define), ("Jump to word...", "F4", Action::WordJump), ("Next occurrence of word", "F5", Action::WordNext), ("Previous occurrence of word", "Shift-F5", Action::WordPrev), ("Indent", "Tab", Action::Indent), ("Unindent", "Shift-Tab", Action::Unindent)]),
     ("Search", &[("Find...", "Ctrl-F", Action::Find), ("Find next", "F3", Action::FindNext), ("Find previous", "Shift-F3", Action::FindPrev), ("Replace all...", "Ctrl-H", Action::Replace),
                  ("Go to line...", "Ctrl-G", Action::Goto)]),
     ("Cursors", &[("Add next occurrence", "Ctrl-D", Action::NextOccurrence), ("Add cursor above", "Alt-Up", Action::CursorUp), ("Add cursor below", "Alt-Down", Action::CursorDown),
@@ -37,11 +37,11 @@ const PALETTE: &[(&str, Action)] = &[
     ("Undo", Action::Undo), ("Redo", Action::Redo), ("Select all", Action::SelectAll), ("Duplicate line", Action::DuplicateLine), ("Delete line", Action::DeleteLine),
     ("Find", Action::Find), ("Replace all", Action::Replace), ("Go to line", Action::Goto), ("Add next occurrence (multi-cursor)", Action::NextOccurrence),
     ("Add cursor above", Action::CursorUp), ("Add cursor below", Action::CursorDown), ("Single cursor", Action::OneCursor), ("Choose language", Action::Language),
-    ("Define word", Action::Define), ("Diff with file on disk", Action::DiffDisk), ("Diff with another tab", Action::DiffTab), ("Reopen closed tab", Action::ReopenClosed), ("Closed tabs", Action::ClosedTabs), ("Save session as", Action::SaveSession), ("Load session", Action::LoadSession), ("Toggle line numbers", Action::ToggleLineNumbers), ("Keys", Action::Help),
+    ("Define word", Action::Define), ("Jump to word", Action::WordJump), ("Next occurrence of word", Action::WordNext), ("Previous occurrence of word", Action::WordPrev), ("Diff with file on disk", Action::DiffDisk), ("Diff with another tab", Action::DiffTab), ("Reopen closed tab", Action::ReopenClosed), ("Closed tabs", Action::ClosedTabs), ("Save session as", Action::SaveSession), ("Load session", Action::LoadSession), ("Toggle line numbers", Action::ToggleLineNumbers), ("Keys", Action::Help),
 ];
 
 pub const HELP: &str = "Ctrl-S save  Ctrl-O open  Ctrl-N new  Ctrl-W close  Ctrl-Q quit | Ctrl-Z/Y undo/redo  Ctrl-X/C/V  Ctrl-A all  Ctrl-K del line | \
-Ctrl-F find  F3/Shift-F3  Ctrl-H replace  Ctrl-G line | Ctrl-D next occurrence  Alt-Up/Down more cursors  Alt-click add cursor  Esc one cursor | \
+Ctrl-F find  F3/Shift-F3  Ctrl-H replace  Ctrl-G line  F4 jump to word (buffer + dictionary)  F5/Shift-F5 next/prev occurrence  F2 define | Ctrl-D next occurrence  Alt-Up/Down more cursors  Alt-click add cursor  Esc one cursor | \
 Ctrl-PgUp/PgDn tabs  Ctrl-L language  Ctrl-P palette  mouse: click, drag, double-click word, triple-click line, wheel";
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -50,12 +50,13 @@ pub enum PromptKind { Open, SaveAs, Find, Goto, ReplaceFind, ReplaceWith, SaveSe
 pub struct Prompt { pub kind: PromptKind, pub label: String, pub input: String, pub aux: String }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub enum PickerKind { Palette, Language, Sessions, Closed, DiffTab }
+pub enum PickerKind { Palette, Language, Sessions, Closed, DiffTab, Word }
 
 pub struct Picker { pub kind: PickerKind, pub filter: String, pub items: Vec<String>, pub sel: usize }
 
 impl Picker {
     pub fn shown(&self) -> Vec<usize> {
+        if self.kind == PickerKind::Word { return (0..self.items.len()).collect(); }   // already ranked and filtered by the app
         let f = self.filter.to_lowercase();
         let mut v: Vec<usize> = (0..self.items.len()).filter(|&i| f.split_whitespace().all(|w| self.items[i].to_lowercase().contains(w))).collect();
         // names that start with the typed text come first, the rest keep their (alphabetical) order
@@ -103,6 +104,12 @@ pub struct App {
     pub dict: crate::dict::Dict,
     /// word suggestions under the caret: (word, meaning) list, selected row, chars already typed
     pub suggest: Option<(Vec<(String, String)>, usize, usize)>,
+    /// word-completion popup while typing: off unless `frost.autocomplete = true` (jump to a word with F4 instead)
+    pub autocomplete: bool,
+    /// unique words of the active buffer with the lines they occur on, alive only while the word-jump picker is open
+    word_idx: Vec<(String, Vec<usize>)>,
+    /// the word last jumped to (F5 / Shift-F5 repeat the jump)
+    last_word: String,
     /// false when started with file arguments: the saved session is not touched
     pub persist: bool,
     /// buffer id -> history generation last written to disk
@@ -143,9 +150,10 @@ impl App {
         let hl = Highlighter::new();
         let mut app = App { tabs: vec![], active: 0, hl, prompt: None, picker: None, menu: None, msg: String::new(), quit: false, line_numbers: true,
                             layout: Layout::default(), show_help: false, last_find: String::new(), clip: String::new(), dragging: false, wheel_at: None, wheel_streak: 0, follow_sig: (usize::MAX, 0, 0),
-                            clicks: (Instant::now(), 0, 0, 0), confirm_quit: false, session_dir: session::session_dir(), hl_key: (0, 0), closed: vec![], hover_row: None, keymap: Default::default(), dict: crate::dict::Dict::load(None), suggest: None, persist: true, hist_written: Default::default() };
+                            clicks: (Instant::now(), 0, 0, 0), confirm_quit: false, session_dir: session::session_dir(), hl_key: (0, 0), closed: vec![], hover_row: None, keymap: Default::default(), dict: crate::dict::Dict::load(None), suggest: None, autocomplete: false, word_idx: Vec::new(), last_word: String::new(), persist: true, hist_written: Default::default() };
         app.line_numbers = cfg.line_numbers;
         app.keymap = cfg.keys.iter().filter_map(|(k, v)| action_by_name(v).map(|a| (k.clone(), a))).collect();
+        app.autocomplete = cfg.autocomplete;
         if cfg.dictionary.is_some() { app.dict = crate::dict::Dict::load(cfg.dictionary.clone()); }
         if let Some(e) = cfg.error { app.msg = e; }
         // Notepad++ model: the session is ALWAYS kept. Whatever is open (saved files, unsaved edits, untitled tabs) comes back on the
@@ -306,6 +314,18 @@ impl App {
                     match self.dict.define(&w) { Some(m) => format!("{w}: {m}"), None => format!("{w}: no entry (add it to ~/.config/frost/dictionary.txt)") }
                 };
             }
+            Action::WordJump => {
+                self.build_word_idx();
+                if self.word_idx.is_empty() { self.msg = "no words in this tab".into(); } else {
+                    self.picker = Some(Picker { kind: PickerKind::Word, filter: String::new(), items: vec![], sel: 0 });
+                    self.refresh_words();
+                }
+            }
+            Action::WordNext | Action::WordPrev => {
+                if self.last_word.is_empty() { let (w, _) = self.buf().word_at_caret(); self.last_word = w; }
+                let w = self.last_word.clone();
+                if w.is_empty() { self.msg = "F4 picks a word first".into(); } else if !self.jump_word(&w, a == Action::WordNext) { self.msg = format!("'{w}' is not in this tab"); }
+            }
             Action::DiffDisk => {
                 let b = self.buf();
                 let Some(p) = b.path.clone() else { self.msg = "save the file first - nothing on disk to compare with".into(); return; };
@@ -419,6 +439,7 @@ impl App {
         }
         let typing = matches!(k.code, KeyCode::Char(_) | KeyCode::Backspace) && !k.modifiers.intersects(KeyModifiers::CONTROL | KeyModifiers::ALT);
         self.on_key_inner(k);
+        if self.picker.is_none() && !self.word_idx.is_empty() { self.word_idx = Vec::new(); }
         if typing { self.update_suggest(); } else { self.suggest = None; }
     }
 
@@ -434,7 +455,7 @@ impl App {
 
     fn update_suggest(&mut self) {
         self.suggest = None;
-        if self.picker.is_some() || self.prompt.is_some() || self.tabs.is_empty() { return; }
+        if !self.autocomplete || self.picker.is_some() || self.prompt.is_some() || self.tabs.is_empty() { return; }
         let b = &self.tabs[self.active.min(self.tabs.len() - 1)];
         if b.cursors.len() != 1 || b.cursors[0].has_sel() { return; }
         let (w, start) = b.word_at_caret();
@@ -498,6 +519,8 @@ impl App {
             KeyCode::PageDown => self.buf().move_cursors(Move::PageDown(page), shift),
             KeyCode::F(1) => self.run(Action::Help),
             KeyCode::F(2) => self.run(Action::Define),
+            KeyCode::F(4) => self.run(Action::WordJump),
+            KeyCode::F(5) => self.run(if shift { Action::WordPrev } else { Action::WordNext }),
             KeyCode::F(3) => self.run(if shift { Action::FindPrev } else { Action::FindNext }),
             KeyCode::F(10) => self.menu = Some(0),
             _ => {}
@@ -575,8 +598,8 @@ impl App {
             KeyCode::Down => pk.sel = (pk.sel + 1).min(n.saturating_sub(1)),
             KeyCode::PageUp => pk.sel = pk.sel.saturating_sub(10),
             KeyCode::PageDown => pk.sel = (pk.sel + 10).min(n.saturating_sub(1)),
-            KeyCode::Backspace => { pk.filter.pop(); pk.sel = 0; }
-            KeyCode::Char(c) if !k.modifiers.contains(KeyModifiers::CONTROL) => { pk.filter.push(c); pk.sel = 0; }
+            KeyCode::Backspace => { pk.filter.pop(); pk.sel = 0; if pk.kind == PickerKind::Word { self.refresh_words(); } }
+            KeyCode::Char(c) if !k.modifiers.contains(KeyModifiers::CONTROL) => { pk.filter.push(c); pk.sel = 0; if pk.kind == PickerKind::Word { self.refresh_words(); } }
             KeyCode::Enter => {
                 let pk = self.picker.take().unwrap();
                 if let Some(&i) = pk.shown().get(pk.sel) { self.picked(pk.kind, &pk.items[i].clone()); }
@@ -585,8 +608,99 @@ impl App {
         }
     }
 
+    fn build_word_idx(&mut self) {
+        let b = self.buf();
+        b.ensure_loaded();
+        let mut map: std::collections::HashMap<String, Vec<usize>> = Default::default();
+        let mut seen = 0usize;
+        'lines: for i in 0..b.lines() {
+            for w in b.text.line(i).to_string().split(|c: char| !(c.is_alphanumeric() || c == '_')) {
+                if w.chars().count() < 2 { continue; }
+                seen += w.len();
+                let v = map.entry(w.to_string()).or_default();
+                if v.last() != Some(&i) && v.len() < 5000 { v.push(i); }
+                if map.len() > 200_000 || seen > 64 << 20 { break 'lines; }
+            }
+        }
+        self.word_idx = map.into_iter().collect();
+    }
+
+    /// rank the buffer words (and dictionary words that are not in the text) against the picker filter: prefix, substring, fuzzy
+    fn refresh_words(&mut self) {
+        let Some(pk) = self.picker.as_ref().filter(|p| p.kind == PickerKind::Word) else { return };
+        let f = pk.filter.to_lowercase();
+        let cur = { let b = &self.tabs[self.active.min(self.tabs.len() - 1)]; b.pos(b.primary().head).0 };
+        let next_line = |ls: &Vec<usize>| ls.iter().copied().find(|&l| l >= cur).unwrap_or(ls[0]);
+        let dist = |ls: &Vec<usize>| { let n = next_line(ls); if n >= cur { n - cur } else { usize::MAX / 2 + cur - n } };
+        let mut scored: Vec<(u8, usize, usize, usize)> = vec![];   // (score, distance, length, index)
+        for (i, (w, ls)) in self.word_idx.iter().enumerate() {
+            let lw = w.to_lowercase();
+            let sc = if f.is_empty() || lw.starts_with(&f) { 0 } else if lw.contains(&f) { 1 } else {
+                let mut it = lw.chars(); if f.chars().all(|c| it.any(|x| x == c)) { 2 } else { continue }
+            };
+            scored.push((sc, dist(ls), w.chars().count(), i));
+        }
+        scored.sort_by(|a, b| (a.0, a.1, a.2).cmp(&(b.0, b.1, b.2)).then_with(|| self.word_idx[a.3].0.cmp(&self.word_idx[b.3].0)));
+        let mut items: Vec<String> = scored.iter().take(300).map(|&(_, _, _, i)| {
+            let (w, ls) = &self.word_idx[i];
+            format!("{w}  line {}  x{}", next_line(ls) + 1, ls.len())
+        }).collect();
+        if f.chars().count() >= 2 {
+            let have: std::collections::HashSet<String> = self.word_idx.iter().map(|e| e.0.to_lowercase()).collect();
+            for (w, m) in self.dict.complete(&f, &[], 40).into_iter().filter(|(w, _)| !have.contains(&w.to_lowercase())).take(12) {
+                items.push(if m.is_empty() { format!("{w}  - dictionary") } else { format!("{w}  - {m}") });
+            }
+        }
+        if let Some(pk) = self.picker.as_mut() { pk.items = items; pk.sel = 0; }
+    }
+
+    /// move the caret onto the next (or previous) whole-word occurrence of `w`, wrapping around; the word is selected
+    fn jump_word(&mut self, w: &str, forward: bool) -> bool {
+        let b = self.buf();
+        b.ensure_loaded();
+        let n = b.lines();
+        let head = b.primary();
+        let cl = b.pos(if forward { head.end() } else { head.start() }).0;
+        let occ = |line: usize| -> Vec<(usize, usize)> {
+            let t = b.text.line(line).to_string();
+            let base = b.text.line_to_char(line);
+            let wl = w.chars().count();
+            let mut v = vec![];
+            let mut start: Option<usize> = None;
+            let mut chars: Vec<char> = t.chars().collect();
+            chars.push('\n');   // sentinel closes the last word
+            for (i, c) in chars.iter().enumerate() {
+                let wc = c.is_alphanumeric() || *c == '_';
+                if wc && start.is_none() { start = Some(i); }
+                if !wc { if let Some(s0) = start.take() { if i - s0 == wl && chars[s0..i].iter().copied().eq(w.chars()) { v.push((base + s0, base + i)); } } }
+            }
+            v
+        };
+        for step in 0..=n {
+            let line = if forward { (cl + step) % n } else { (cl + n - step % n) % n };
+            let mut o = occ(line);
+            if !forward { o.reverse(); }
+            for (s, e) in o {
+                let ok = if step == 0 { if forward { s >= head.end() } else { e <= head.start() } } else if step == n { if forward { s < head.end() } else { e > head.start() } } else { true };
+                if ok {
+                    b.cursors = vec![crate::buffer::Cursor { head: e, anchor: s, want: None }];
+                    return true;
+                }
+            }
+        }
+        false
+    }
+
     fn picked(&mut self, kind: PickerKind, item: &str) {
         match kind {
+            PickerKind::Word => {
+                let w = item.split_whitespace().next().unwrap_or("").to_string();
+                let in_text = self.word_idx.iter().any(|e| e.0 == w);
+                if in_text {
+                    self.last_word = w.clone();
+                    if !self.jump_word(&w, true) { self.msg = format!("'{w}' not found"); }
+                } else if let Some(m) = self.dict.define(&w) { self.msg = format!("{w}: {m} (not in this tab)"); } else { self.msg = format!("'{w}' is not in this tab"); }
+            }
             PickerKind::Palette => if let Some(a) = PALETTE.iter().find(|p| p.0 == item) { self.run(a.1); },
             PickerKind::Language => if let Some(i) = self.hl.index_of(item) { self.buf().syntax = i; self.hl.invalidate_from(0); },
             PickerKind::DiffTab => {

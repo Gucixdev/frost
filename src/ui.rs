@@ -203,7 +203,7 @@ fn picker(f: &mut Frame, app: &mut App, area: Rect) {
     let h = (shown.len() as u16 + 3).clamp(5, 20);
     let rect = centered(area, 56, h);
     f.render_widget(Clear, rect);
-    let title = match pk.kind { crate::app::PickerKind::Palette => " Command palette ", crate::app::PickerKind::Language => " Language ", crate::app::PickerKind::Sessions => " Sessions ", crate::app::PickerKind::Closed => " Closed tabs ", crate::app::PickerKind::DiffTab => " Compare with " };
+    let title = match pk.kind { crate::app::PickerKind::Palette => " Command palette ", crate::app::PickerKind::Language => " Language ", crate::app::PickerKind::Sessions => " Sessions ", crate::app::PickerKind::Closed => " Closed tabs ", crate::app::PickerKind::DiffTab => " Compare with ", crate::app::PickerKind::Word => " Jump to word (buffer + dictionary) " };
     let block = Block::default().borders(Borders::ALL).title(title).border_style(Style::default().fg(crate::config::theme().accent)).style(Style::default().bg(crate::config::theme().bar).fg(crate::config::theme().fg));
     let inner = block.inner(rect);
     f.render_widget(block, rect);
