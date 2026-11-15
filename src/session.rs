@@ -121,7 +121,6 @@ pub fn load_named(dir: &Path, name: &str) -> Option<Session> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::env;
     struct TmpDir(PathBuf);
     impl TmpDir { fn path(&self) -> &Path { &self.0 } }
     impl Drop for TmpDir { fn drop(&mut self) { let _ = fs::remove_dir_all(&self.0); } }

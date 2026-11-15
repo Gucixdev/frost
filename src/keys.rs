@@ -49,7 +49,7 @@ pub const KEYS: &[Bind] = &[
     b("alt-a", SelectOccurrences, "all matches", "Select every occurrence of the selection (or word)", "Cursors"),
     b("alt-s", SkipOccurrence, "skip", "Skip this occurrence, take the next", "Cursors"),
     b("ctrl-u", UndoCursor, "undo cursor", "Drop the newest cursor", "Cursors"),
-    b("alt-l", SplitLines, "split lines", "Cursor at the end of each selected line", "Cursors"),
+    b("alt-l", SplitLines, "split lines", "One cursor at the end of each selected line", "Cursors"),
     b("alt-up", CursorUp, "cursor up", "Add a cursor above", "Cursors"),
     b("alt-down", CursorDown, "cursor down", "Add a cursor below", "Cursors"),
     b("esc", OneCursor, "one cursor", "Back to one cursor, drop the selection", "Cursors"),

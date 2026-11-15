@@ -39,7 +39,7 @@ pub const MENUS: &[(&str, &[(&str, Action)])] = &[
     ("Search", &[("Find...", Action::Find), ("Find next", Action::FindNext), ("Find previous", Action::FindPrev), ("Replace all...", Action::Replace),
                  ("Go to line...", Action::Goto)]),
     ("Cursors", &[("Add next occurrence", Action::NextOccurrence), ("Select all occurrences", Action::SelectOccurrences), ("Skip this occurrence", Action::SkipOccurrence),
-                  ("Add cursor above", Action::CursorUp), ("Add cursor below", Action::CursorDown), ("Cursor at the end of each selected line", Action::SplitLines),
+                  ("Add cursor above", Action::CursorUp), ("Add cursor below", Action::CursorDown), ("Cursor per selected line", Action::SplitLines),
                   ("Undo last cursor", Action::UndoCursor), ("Single cursor", Action::OneCursor)]),
     ("View", &[("Next tab", Action::NextTab), ("Previous tab", Action::PrevTab), ("Line numbers", Action::ToggleLineNumbers), ("Command palette", Action::Palette)]),
     ("Language", &[("Choose language...", Action::Language)]),
@@ -50,7 +50,7 @@ const PALETTE: &[(&str, Action)] = &[
     ("New file", Action::New), ("Open file", Action::Open), ("Save", Action::Save), ("Save as", Action::SaveAs), ("Close tab", Action::Close), ("Quit", Action::Quit),
     ("Undo", Action::Undo), ("Redo", Action::Redo), ("Select all", Action::SelectAll), ("Duplicate line", Action::DuplicateLine), ("Delete line", Action::DeleteLine),
     ("Find", Action::Find), ("Replace all", Action::Replace), ("Go to line", Action::Goto), ("Add next occurrence (multi-cursor)", Action::NextOccurrence),
-    ("Select all occurrences", Action::SelectOccurrences), ("Skip this occurrence", Action::SkipOccurrence), ("Undo last cursor", Action::UndoCursor), ("Cursor at the end of each selected line", Action::SplitLines),
+    ("Select all occurrences", Action::SelectOccurrences), ("Skip this occurrence", Action::SkipOccurrence), ("Undo last cursor", Action::UndoCursor), ("Cursor per selected line", Action::SplitLines),
     ("Add cursor above", Action::CursorUp), ("Add cursor below", Action::CursorDown), ("Single cursor", Action::OneCursor), ("Choose language", Action::Language),
     ("Define word", Action::Define), ("Jump to word", Action::WordJump), ("Next occurrence of word", Action::WordNext), ("Previous occurrence of word", Action::WordPrev), ("Diff with file on disk", Action::DiffDisk), ("Diff with another tab", Action::DiffTab), ("Reopen closed tab", Action::ReopenClosed), ("Closed tabs", Action::ClosedTabs), ("Save session as", Action::SaveSession), ("Load session", Action::LoadSession), ("Toggle line numbers", Action::ToggleLineNumbers), ("Keys", Action::Help),
 ];
@@ -896,12 +896,6 @@ impl App {
         }
     }
 
-    /// scroll the view by `d` lines without touching the cursor (Ctrl+Up/Down)
-    pub fn scroll_view(&mut self, d: isize) {
-        let b = self.buf();
-        let last = b.lines().saturating_sub(1);
-        b.scroll = if d < 0 { b.scroll.saturating_sub((-d) as usize) } else { (b.scroll + d as usize).min(last) };
-    }
 
     /// keep the primary cursor on screen
     pub fn scroll_to_cursor(&mut self) {

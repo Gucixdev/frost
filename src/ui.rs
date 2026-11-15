@@ -257,7 +257,9 @@ fn picker(f: &mut Frame, app: &mut App, area: Rect) {
     let Some(pk) = app.picker.as_ref() else { return };
     let shown = pk.shown();
     let h = (shown.len() as u16 + 3).clamp(5, area.height.saturating_sub(4).clamp(5, 30));
-    let rect = centered(area, if pk.kind == crate::app::PickerKind::Keys { 68 } else { 56 }, h);
+    // the key list is as wide as its longest row (not the filtered rows, so it does not jump while you type)
+    let w = if pk.kind == crate::app::PickerKind::Keys { (pk.items.iter().map(|i| i.chars().count()).max().unwrap_or(0) as u16 + 6).clamp(68, 100) } else { 56 };
+    let rect = centered(area, w, h);
     f.render_widget(Clear, rect);
     let title = match pk.kind { crate::app::PickerKind::Palette => " Command palette ", crate::app::PickerKind::Language => " Language ", crate::app::PickerKind::Sessions => " Sessions ", crate::app::PickerKind::Closed => " Closed tabs ", crate::app::PickerKind::DiffTab => " Compare with ", crate::app::PickerKind::Word => " Jump to word (buffer + dictionary) ", crate::app::PickerKind::Keys => " Keys (type to filter, Enter runs) " };
     let block = Block::default().borders(Borders::ALL).title(title).border_style(Style::default().fg(crate::config::theme().accent)).style(Style::default().bg(crate::config::theme().bar).fg(crate::config::theme().fg));
@@ -406,5 +408,17 @@ mod tests {
         t.draw(|f| draw(f, &mut app)).unwrap();
         let status = rows(&t).pop().unwrap();
         assert!(!status.contains("unclosed") && !status.contains("stray"), "{status:?}");
+    }
+
+    #[test]
+    fn no_row_of_the_key_list_is_cut_off() {
+        let mut app = App::blank();
+        app.run(crate::app::Action::Help);
+        let mut t = Terminal::new(TestBackend::new(110, 40)).unwrap();
+        t.draw(|f| draw(f, &mut app)).unwrap();
+        let widest = crate::keys::overview(&app.keymap).iter().map(|r| r.0.trim_end().chars().count()).max().unwrap();
+        let top = rows(&t).into_iter().find(|r| r.contains("Keys (type")).unwrap();
+        let box_w = top.trim().chars().count();
+        assert!(box_w >= widest + 4, "the popup is {box_w} wide, the longest row needs {}", widest + 4);
     }
 }
