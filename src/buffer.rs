@@ -3,6 +3,7 @@ use ropey::Rope;
 use std::path::{Path, PathBuf};
 
 mod multi;
+mod smart;
 use std::time::SystemTime;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -104,6 +105,11 @@ pub struct Buffer {
     synced_path: Option<PathBuf>,
     /// a merge left `<<<<<<<` markers in the text: save refuses until they are gone
     pub conflict: bool,
+    /// what the language of the tab allows while typing (set by the app from the syntax)
+    pub lang: crate::lang::Lang,
+    scan_cache: Option<(u64, std::sync::Arc<crate::lang::Scan>)>,
+    /// a refusal the app should tell the user about (strict brackets)
+    pub notice: Option<String>,
 }
 
 /// files up to this many bytes follow the disk live (kept in memory a second time as the merge base)
@@ -133,7 +139,7 @@ impl Buffer {
     pub fn new() -> Self {
         let mut b = Buffer { text: Rope::new(), path: None, modified: false, crlf: false, cursors: vec![Cursor::at(0)], syntax: 0, scroll: 0, hscroll: 0,
                  undo: vec![], redo: vec![], last_kind: "", version: 0, first_changed: usize::MAX, loading: None, title: None, hid: String::new(), hist_gen: 0,
-                 base: String::new(), disk_sig: None, synced_path: None, conflict: false,
+                 base: String::new(), disk_sig: None, synced_path: None, conflict: false, lang: Default::default(), scan_cache: None, notice: None,
                  id: { static N: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1); N.fetch_add(1, std::sync::atomic::Ordering::Relaxed) } };
         b.hid = format!("{:x}{:x}", std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_nanos()).unwrap_or(0), b.id);
         b
@@ -390,7 +396,9 @@ impl Buffer {
     /// The general edit: `f` looks at the untouched text and one cursor and says what to replace and where that cursor ends up.
     /// All cursors are edited as one undo step; edits go back to front so earlier positions stay valid, cursors that end up on the
     /// same spot are merged.
-    pub(crate) fn edit_with(&mut self, kind: &'static str, f: &dyn Fn(usize, &Rope, &Cursor) -> Edit) {
+    pub(crate) fn edit_with(&mut self, kind: &'static str, f: &dyn Fn(usize, &Rope, &Cursor) -> Edit) { self.guarded(|b| b.edit_raw(kind, f)) }
+
+    fn edit_raw(&mut self, kind: &'static str, f: &dyn Fn(usize, &Rope, &Cursor) -> Edit) {
         self.checkpoint(kind);
         self.normalize();
         // normalize leaves the primary cursor last; edit in text order and put the primary back last afterwards
@@ -453,37 +461,9 @@ impl Buffer {
         });
     }
 
-    pub fn newline(&mut self) {
-        // every cursor keeps the indentation of its own line (as far as the caret is inside it)
-        self.edit_with("newline", &|_, text, c| {
-            let l = text.char_to_line(c.start());
-            let ls = text.line_to_char(l);
-            let ind: String = text.line(l).chars().take(c.start() - ls).take_while(|ch| *ch == ' ' || *ch == '\t').collect();
-            let t = format!("\n{ind}");
-            let n = t.chars().count();
-            Edit { start: c.start(), end: c.end(), text: t, head: n, anchor: n }
-        });
-    }
-
-    pub fn backspace(&mut self) {
-        if self.cursors.iter().all(|c| !c.has_sel()) {
-            // turn "delete one char before" into a selection, then replace it with nothing
-            for c in self.cursors.iter_mut() { if c.head > 0 { c.anchor = c.head - 1; } }
-        }
-        self.delete_selected();
-    }
-
     /// delete what the cursors select; nothing selected anywhere (start of the text, say) is not an edit
     fn delete_selected(&mut self) {
         if self.cursors.iter().any(|c| c.has_sel()) { self.edit_each("del", &|_| String::new()); }
-    }
-
-    pub fn delete(&mut self) {
-        let n = self.len();
-        if self.cursors.iter().all(|c| !c.has_sel()) {
-            for c in self.cursors.iter_mut() { if c.head < n { c.anchor = c.head + 1; } }
-        }
-        self.delete_selected();
     }
 
     pub fn delete_word_back(&mut self) {
@@ -494,39 +474,6 @@ impl Buffer {
         self.delete_selected();
     }
 
-    pub fn indent(&mut self, back: bool) {
-        if !back && self.cursors.iter().all(|c| !c.has_sel()) {
-            // plain Tab with no selection: insert the indent at each caret
-            self.insert(&" ".repeat(crate::config::tab_width()));
-            return;
-        }
-        self.checkpoint("indent");
-        self.normalize();
-        let mut lines: Vec<usize> = vec![];
-        for c in &self.cursors {
-            let (a, b) = (self.text.char_to_line(c.start()), self.text.char_to_line(c.end()));
-            for l in a..=b { if !lines.contains(&l) { lines.push(l); } }
-        }
-        lines.sort();
-        let first = lines.first().copied().unwrap_or(0);
-        for &l in lines.iter().rev() {
-            let st = self.text.line_to_char(l);
-            if back {
-                let s = self.line_string(l);
-                let n = if s.starts_with('\t') { 1 } else { s.chars().take(crate::config::tab_width()).take_while(|c| *c == ' ').count() };
-                if n > 0 {
-                    self.text.remove(st..st + n);
-                    self.shift_after(st, -(n as isize));
-                }
-            } else {
-                let w = crate::config::tab_width();
-                self.text.insert(st, &" ".repeat(w));
-                self.shift_after(st, w as isize);
-            }
-        }
-        self.touched(first);
-    }
-
     /// move every cursor end at or after `at` by delta (used by line operations that edit outside the cursors)
     fn shift_after(&mut self, at: usize, delta: isize) {
         for c in self.cursors.iter_mut() {
@@ -535,7 +482,8 @@ impl Buffer {
         }
     }
 
-    pub fn delete_lines(&mut self) {
+    pub fn delete_lines(&mut self) { self.guarded(|b| b.delete_lines_raw()) }
+    fn delete_lines_raw(&mut self) {
         self.checkpoint("line");
         self.normalize();
         let mut ranges: Vec<(usize, usize)> = vec![];
@@ -556,7 +504,8 @@ impl Buffer {
         self.touched(first);
     }
 
-    pub fn duplicate_lines(&mut self) {
+    pub fn duplicate_lines(&mut self) { self.guarded(|b| b.duplicate_lines_raw()) }
+    fn duplicate_lines_raw(&mut self) {
         self.checkpoint("line");
         self.normalize();
         let mut first = usize::MAX;

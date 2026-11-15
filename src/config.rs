@@ -9,7 +9,13 @@ use std::sync::OnceLock;
 #[derive(Clone, Copy)]
 pub struct Theme { pub terminal: bool, pub bg: Color, pub bar: Color, pub dim: Color, pub fg: Color, pub accent: Color, pub sel: Color, pub cursor2: Color }
 
+/// Automatic brackets and quotes: `pairs` maps a lower-case language name ("*" = every other) to the opening characters that
+/// get a partner, `strict` to "never leave this language with unbalanced brackets".
+#[derive(Clone, Default)]
+pub struct Pairing { pub off: bool, pub pairs: HashMap<String, String>, pub strict: HashMap<String, bool> }
+
 pub struct Config {
+    pub pairing: Pairing,
     pub theme: Theme,
     pub line_numbers: bool,
     pub keys: HashMap<String, String>,
@@ -18,9 +24,11 @@ pub struct Config {
 }
 
 static THEME: OnceLock<Theme> = OnceLock::new();
+static PAIRING: OnceLock<Pairing> = OnceLock::new();
 static TAB: AtomicUsize = AtomicUsize::new(4);
 
 pub fn theme() -> &'static Theme { THEME.get_or_init(|| preset("terminal")) }
+pub fn pairing() -> &'static Pairing { PAIRING.get_or_init(Pairing::default) }
 pub fn tab_width() -> usize { TAB.load(Ordering::Relaxed) }
 
 const fn rgb(r: u8, g: u8, b: u8) -> Color { Color::Rgb(r, g, b) }
@@ -56,12 +64,13 @@ pub fn config_dir() -> PathBuf {
 }
 
 pub fn load() -> Config {
-    let mut cfg = Config { theme: preset("terminal"), line_numbers: true, keys: HashMap::new(), dictionary: None, error: None };
+    let mut cfg = Config { pairing: Pairing::default(), theme: preset("terminal"), line_numbers: true, keys: HashMap::new(), dictionary: None, error: None };
     let path = config_dir().join("init.lua");
     if let Ok(src) = std::fs::read_to_string(&path) {
         if let Err(e) = run(&src, &mut cfg) { cfg.error = Some(format!("init.lua: {}", e.to_string().lines().next().unwrap_or(""))); }
     }
     let _ = THEME.set(cfg.theme);
+    let _ = PAIRING.set(cfg.pairing.clone());
     cfg
 }
 
@@ -74,6 +83,9 @@ fn run(src: &str, cfg: &mut Config) -> mlua::Result<()> {
     frost.set("theme", "terminal")?;
     frost.set("colors", lua.create_table()?)?;
     frost.set("keys", lua.create_table()?)?;
+    frost.set("auto_pair", true)?;
+    frost.set("pairs", lua.create_table()?)?;
+    frost.set("strict", lua.create_table()?)?;
     lua.globals().set("frost", frost.clone())?;
     lua.load(src).exec()?;
     cfg.line_numbers = frost.get::<bool>("line_numbers").unwrap_or(true);
@@ -90,6 +102,9 @@ fn run(src: &str, cfg: &mut Config) -> mlua::Result<()> {
     if let Ok(k) = frost.get::<Table>("keys") {
         for pair in k.pairs::<String, String>().flatten() { cfg.keys.insert(pair.0.to_lowercase(), pair.1.to_lowercase()); }
     }
+    cfg.pairing.off = !frost.get::<bool>("auto_pair").unwrap_or(true);
+    if let Ok(t) = frost.get::<Table>("pairs") { for (k, v) in t.pairs::<String, String>().flatten() { cfg.pairing.pairs.insert(k.to_lowercase(), v); } }
+    if let Ok(t) = frost.get::<Table>("strict") { for (k, v) in t.pairs::<String, bool>().flatten() { cfg.pairing.strict.insert(k.to_lowercase(), v); } }
     cfg.dictionary = frost.get::<String>("dictionary").ok().map(PathBuf::from);
     Ok(())
 }
@@ -97,7 +112,7 @@ fn run(src: &str, cfg: &mut Config) -> mlua::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    fn fresh() -> Config { Config { theme: preset("terminal"), line_numbers: true, keys: HashMap::new(), dictionary: None, error: None } }
+    fn fresh() -> Config { Config { pairing: Pairing::default(), theme: preset("terminal"), line_numbers: true, keys: HashMap::new(), dictionary: None, error: None } }
 
     #[test]
     fn lua_sets_options_theme_and_keys() {
@@ -108,6 +123,18 @@ mod tests {
         assert!(matches!(c.theme.bg, Color::Rgb(250, 250, 248)));
         assert_eq!(c.keys["ctrl-j"], "goto");
         assert_eq!(c.dictionary, Some(PathBuf::from("/x/y")));
+    }
+
+    #[test]
+    fn lua_sets_pairing() {
+        let mut c = fresh();
+        run("frost.auto_pair = false; frost.pairs['Rust'] = '([{'; frost.strict['Emacs Lisp'] = false", &mut c).unwrap();
+        assert!(c.pairing.off);
+        assert_eq!(c.pairing.pairs["rust"], "([{");
+        assert_eq!(c.pairing.strict["emacs lisp"], false);
+        let mut d = fresh();
+        run("", &mut d).unwrap();
+        assert!(!d.pairing.off && d.pairing.pairs.is_empty());
     }
 
     #[test]

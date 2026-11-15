@@ -70,7 +70,7 @@ fn cells(spans: &[(Style, String)]) -> Vec<(char, Style, usize)> {
     for (st, s) in spans {
         for ch in s.chars() {
             if ch == '\t' {
-                let n = 4 - disp % 4;
+                let n = crate::config::tab_width() - disp % crate::config::tab_width();
                 for _ in 0..n { out.push((' ', *st, col)); }
                 disp += n;
             } else {
@@ -84,7 +84,11 @@ fn cells(spans: &[(Style, String)]) -> Vec<(char, Style, usize)> {
 }
 
 fn text_area(f: &mut Frame, app: &mut App, r: Rect, gutter: u16) {
+    app.sync_lang();
     let i = app.active.min(app.tabs.len() - 1);
+    let scan = app.tabs[i].brackets();
+    // the bracket at the caret (or just before it) and its partner are marked
+    let pair = { let p = app.tabs[i].primary(); if p.has_sel() { None } else { [p.head, p.head.wrapping_sub(1)].iter().find_map(|a| scan.partner.get(a).map(|b| (*a, *b))) } };
     let (scroll, hscroll, syntax) = (app.tabs[i].scroll, app.tabs[i].hscroll, app.tabs[i].syntax);
     let total = app.tabs[i].lines();
     let count = (r.height as usize).min(total.saturating_sub(scroll));
@@ -121,6 +125,8 @@ fn text_area(f: &mut Frame, app: &mut App, r: Rect, gutter: u16) {
             let mut st = *st;
             if b.cursors.iter().any(|c| c.has_sel() && abs >= c.start() && abs < c.end()) { st = st.bg(crate::config::theme().sel); }
             if b.cursors.iter().any(|c| c.head == abs && c.head != primary.head) { st = st.patch(crate::config::caret2_style()); }
+            if pair.is_some_and(|(a, z)| abs == a || abs == z) { st = st.fg(crate::config::theme().accent).add_modifier(Modifier::BOLD | Modifier::UNDERLINED); }
+            if scan.bad.binary_search_by_key(&abs, |x| x.0).is_ok() { st = st.fg(Color::Red).add_modifier(Modifier::BOLD | Modifier::UNDERLINED); }
             row.push(Span::styled(ch.to_string(), st));
             shown += 1;
         }
@@ -189,12 +195,20 @@ fn status_bar(f: &mut Frame, app: &mut App, r: Rect) {
     let b = &app.tabs[i];
     let (l, c) = b.pos(b.primary().head);
     let sel: usize = b.cursors.iter().map(|c| c.end() - c.start()).sum();
+    let scan = app.tabs[i].brackets();
+    let b = &app.tabs[i];
+    // brackets: all matched, or the first one that is not
+    let (br, br_bad) = match scan.bad.first() {
+        Some(&(p, ch)) if scan.checked => (format!("{} {ch} line {}{}  ", if crate::lang::closer_of(ch).is_some() { "unclosed" } else { "stray" }, b.pos(p).0 + 1, if scan.bad.len() > 1 { format!(" (+{})", scan.bad.len() - 1) } else { String::new() }), true),
+        _ if scan.checked && !scan.partner.is_empty() => ("() ok  ".to_string(), false),
+        _ => (String::new(), false),
+    };
     let right = format!("{}{}Ln {}, Col {}  {}  {}{} ",
         if b.cursors.len() > 1 { format!("{} cursors  ", b.cursors.len()) } else { String::new() },
         if sel > 0 { format!("{sel} selected  ") } else { String::new() },
         l + 1, c + 1, syn, if b.crlf { "CRLF" } else { "LF" }, b.load_pct().map(|p| format!("  loading {p}%")).unwrap_or_default());
     // the message never pushes the right part off the screen: it is cut instead
-    let room = w.saturating_sub(right.chars().count());
+    let room = w.saturating_sub(right.chars().count() + br.chars().count());
     let mut row: Vec<Span> = match &msg {
         Some(m) => {
             let left = format!(" {m}");
@@ -204,7 +218,8 @@ fn status_bar(f: &mut Frame, app: &mut App, r: Rect) {
         None => hint_spans(&hints, room.saturating_sub(1)),
     };
     let used: usize = row.iter().map(|s| s.content.chars().count()).sum();
-    row.push(Span::raw(" ".repeat(w.saturating_sub(used + right.chars().count()))));
+    row.push(Span::raw(" ".repeat(w.saturating_sub(used + right.chars().count() + br.chars().count()))));
+    row.push(Span::styled(br, if br_bad { bar.fg(Color::Red).add_modifier(Modifier::BOLD) } else { bar.fg(if t.terminal { Color::Gray } else { t.dim }) }));
     row.push(Span::raw(right));
     f.render_widget(Paragraph::new(Line::from(row)).style(bar), r);
 }
@@ -360,5 +375,36 @@ mod tests {
         app.keymap.remove("ctrl-shift-z");
         t.draw(|f| draw(f, &mut app)).unwrap();
         assert!(rows(&t).join("\n").contains("Ctrl-B"), "a rebound key shows in the menu");
+    }
+
+    fn marked(t: &Terminal<TestBackend>, f: impl Fn(&ratatui::buffer::Cell) -> bool) -> String {
+        t.backend().buffer().content().iter().filter(|c| f(c)).map(|c| c.symbol().to_string()).collect()
+    }
+
+    #[test]
+    fn brackets_are_matched_underlined_and_counted() {
+        let mut app = App::blank();
+        app.tabs[0] = crate::buffer::Buffer::from_text("fn f() {\n  g(1;\n}", None);
+        app.tabs[0].syntax = app.hl.index_of("Rust").unwrap();
+        let mut t = Terminal::new(TestBackend::new(80, 8)).unwrap();
+        t.draw(|f| draw(f, &mut app)).unwrap();
+        let red = |c: &ratatui::buffer::Cell| c.fg == Color::Red && c.modifier.contains(Modifier::UNDERLINED);
+        assert_eq!(marked(&t, red), "(", "the unclosed ( on line 2 is red");
+        let status = rows(&t).pop().unwrap();
+        assert!(status.contains("unclosed ( line 2"), "{status:?}");
+        // fix it: the warning goes, the caret next to a bracket marks both ends
+        app.tabs[0] = crate::buffer::Buffer::from_text("fn f() {\n  g(1);\n}", None);
+        app.tabs[0].syntax = app.hl.index_of("Rust").unwrap();
+        app.tabs[0].cursors = vec![crate::buffer::Cursor::at(15)];   // right after the ( on line 2
+        t.draw(|f| draw(f, &mut app)).unwrap();
+        assert_eq!(marked(&t, red), "");
+        let accent = crate::config::theme().accent;
+        assert_eq!(marked(&t, |c| c.fg == accent && c.modifier.contains(Modifier::BOLD | Modifier::UNDERLINED)), "()");
+        assert!(rows(&t).pop().unwrap().contains("() ok"));
+        // prose is not judged
+        app.tabs[0] = crate::buffer::Buffer::from_text("1) one (two", None);
+        t.draw(|f| draw(f, &mut app)).unwrap();
+        let status = rows(&t).pop().unwrap();
+        assert!(!status.contains("unclosed") && !status.contains("stray"), "{status:?}");
     }
 }

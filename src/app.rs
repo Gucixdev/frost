@@ -536,9 +536,18 @@ impl App {
 
     // ---------------------------------------------------------------- keyboard
     /// run `f`; a message it sets restarts the fade timer, otherwise the previous message keeps counting down
+    /// the active tab follows the language the highlighter picked: pairs, indentation and strictness depend on it
+    pub fn sync_lang(&mut self) {
+        let i = self.active.min(self.tabs.len() - 1);
+        let name = self.hl.name_of(self.tabs[i].syntax);
+        if self.tabs[i].lang.name != name { self.tabs[i].set_lang(crate::lang::Lang::of(&name)); }
+    }
+
     fn keeping_msg(&mut self, f: impl FnOnce(&mut Self)) {
         let old = std::mem::take(&mut self.msg);
+        self.sync_lang();
         f(self);
+        if let Some(n) = self.buf().notice.take() { self.msg = n; }
         if self.msg.is_empty() { self.msg = old; } else { self.msg_t = Instant::now(); }
     }
 
@@ -586,7 +595,7 @@ impl App {
         if let Some(m) = self.menu { return self.menu_key(k, m); }
         if let Some((a, select)) = self.lookup(&k) { return self.run_sel(a, select); }
         if let KeyCode::Char(c) = k.code {
-            if !k.modifiers.intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) { self.buf().insert(&c.to_string()); }
+            if !k.modifiers.intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) { self.buf().type_char(c); }
         }
     }
 
@@ -804,7 +813,7 @@ impl App {
         let s = b.line_string(line);
         let (mut col, mut disp) = (0usize, 0usize);
         for ch in s.chars() {
-            let w = if ch == '\t' { 4 - disp % 4 } else { 1 };
+            let w = if ch == '\t' { crate::config::tab_width() - disp % crate::config::tab_width() } else { 1 };
             if disp + w > want + (w / 2) && disp >= want || disp + w > want { break; }
             disp += w;
             col += 1;
@@ -923,7 +932,8 @@ pub fn amount(t: &str) -> String {
 /// screen column of char column `c` in a line (tabs are 4 wide)
 pub fn display_col(line: &str, c: usize) -> usize {
     let mut d = 0;
-    for ch in line.chars().take(c) { d += if ch == '\t' { 4 - d % 4 } else { 1 }; }
+    let tab = crate::config::tab_width();
+    for ch in line.chars().take(c) { d += if ch == '\t' { tab - d % tab } else { 1 }; }
     d
 }
 

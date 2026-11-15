@@ -275,7 +275,7 @@ mod tests {
         let mut y = b("a\nb");
         y.cursors = vec![Cursor::at(1), Cursor::at(3)];
         y.indent(false);
-        assert_eq!(y.contents(), "a    \nb    ");
+        assert_eq!(y.contents(), "a   \nb   ", "Tab goes to the next stop");
         y.undo();
         assert_eq!(y.contents(), "a\nb");
         assert_eq!(heads(&y), vec![1, 3], "undo brings the cursors back");

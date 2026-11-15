@@ -7,6 +7,7 @@ mod diff;
 mod highlight;
 mod history_store;
 mod keys;
+mod lang;
 mod merge;
 mod session;
 mod ui;

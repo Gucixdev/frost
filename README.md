@@ -21,6 +21,7 @@ CUA clipboard, mouse, multi-cursor, and Notepad++-style sessions. About 2000 lin
 - **Dictionary / word jump:** F4 opens a prompt, type a word and pick from the unique words of the tab (prefix, substring, fuzzy; line number and count shown) plus dictionary words; Enter jumps there, F5 / Shift-F5 go to the next / previous occurrence. F2 explains the word under the caret. Sources: a built-in list, `~/.config/frost/dictionary.txt` (`word<TAB>meaning`) and `/usr/share/dict/words`. The old completion popup is off; `frost.autocomplete = true` in init.lua turns it back on.
 - **Diff:** File > "Diff with file on disk" and "Diff with another tab..." open a unified diff in a tab (syntax-coloured `+`/`-`).
 - **Languages:** 199 syntaxes, picked by extension, file name or shebang; Ctrl-L lists them A-Z with letter markers, typing filters (prefix matches first).
+- **Brackets and indentation:** typing `(` `[` `{` `"` `'` adds the partner (and steps over it, wraps a selection, `Backspace` removes an empty pair, Enter between `{}` opens three lines); indentation copies the file's own (tabs or N spaces) and grows after `{`; matching brackets are marked, unclosed ones are red with a status-line warning; Lisp is strict (no unbalanced edit gets through) and lines up like Emacs. Per language and configurable: [docs/brackets.md](docs/brackets.md).
 - **Config in Lua:** `~/.config/frost/init.lua`, see below.
 - Line endings (LF/CRLF) are kept.
 
@@ -29,7 +30,8 @@ CUA clipboard, mouse, multi-cursor, and Notepad++-style sessions. About 2000 lin
 frost.theme = "terminal"          -- terminal (default: your terminal's own colours), dark, light, gruvbox, mono
 frost.colors.accent = "#ff8800"    -- bg bar dim fg accent sel cursor2
 frost.line_numbers = true
-frost.tab_width = 4
+frost.tab_width = 4               -- display width of a tab, and the indent when a file has none yet
+frost.auto_pair = true             -- see docs/brackets.md for frost.pairs and frost.strict
 frost.dictionary = "/path/to/words.tsv"
 frost.keys["ctrl-j"] = "goto"      -- key spec -> action name (save, quit, undo, find, define, difftab, ...)
 ```
