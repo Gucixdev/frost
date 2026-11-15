@@ -195,6 +195,9 @@ impl Buffer {
         let p = self.path.clone()?;
         let sig = stat_sig(&p)?;
         if Some(sig) == self.disk_sig { return None; }
+        // markers from an earlier merge are still in the text: merging into them would nest markers and duplicate
+        // lines. Leave disk_sig and base alone; the change is merged by the first sync after the markers are gone.
+        if self.conflict && self.has_conflict_marker() { return None; }
         let (sig, theirs) = read_synced(&p)?;
         self.disk_sig = Some(sig);
         if theirs == self.base { return None; }
@@ -1207,6 +1210,34 @@ mod sync_tests {
         b.save().unwrap();
         assert!(!b.conflict && !b.modified);
         assert_eq!(std::fs::read_to_string(&p).unwrap(), "l1\nl2\nresolved\nl4\nl5\n");
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn disk_change_while_conflict_open_does_not_nest_markers() {
+        let d = dir("conflict2");
+        let p = d.join("f.txt");
+        std::fs::write(&p, FIVE).unwrap();
+        let mut b = Buffer::open(&p).unwrap();
+        b.set_cursor_line_col(2, 2);
+        b.insert("mine");
+        write_disk(&p, "l1\nl2\nTHEIRS\nl4\nl5\n", 1);
+        b.sync_disk().expect("first merge");
+        let first = b.contents();
+        // the file changes again, touching the conflicted line and another one
+        write_disk(&p, "l1\nl2\nTHEIRS2\nl4\nL5\n", 2);
+        assert!(b.sync_disk().is_none(), "no merge into open markers");
+        assert_eq!(b.contents(), first);
+        assert_eq!(first.matches("<<<<<<< yours").count(), 1);
+        // resolve; the next save merges the second disk change in, once
+        let resolved = first.replace("<<<<<<< yours\nl3mine\n=======\nTHEIRS\n>>>>>>> disk\n", "resolved\n");
+        b.select_all();
+        b.insert(&resolved);
+        let r = b.save();
+        let text = std::fs::read_to_string(&p).unwrap();
+        assert!(r.is_err() || !text.contains("<<<<<<<"), "{r:?} {text}");
+        assert_eq!(b.contents().matches("<<<<<<< yours").count(), if r.is_err() { 1 } else { 0 });
+        assert_eq!(b.contents().matches("L5").count(), 1, "second disk change merged exactly once: {}", b.contents());
         let _ = std::fs::remove_dir_all(&d);
     }
 
