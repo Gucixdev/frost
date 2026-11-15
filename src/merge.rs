@@ -1,6 +1,7 @@
 //! Three-way merge of text by lines: `base` is the text both sides started from, `mine` the editor's text,
 //! `theirs` the new text on disk. Edits on different lines merge cleanly; edits that touch the same lines
-//! of `base` differently become a conflict with markers.
+//! of `base` differently become a conflict with markers. Two insertions at the same point are not a conflict:
+//! both are kept.
 use similar::{DiffTag, TextDiff};
 
 /// one side's change: replace base lines [s, e) by `new`
@@ -64,7 +65,13 @@ pub fn merge3(base: &str, mine: &str, theirs: &str) -> (String, usize) {
         else if ca.is_empty() { out.push_str(&side(&bl, rs, re, cb)); }
         else {
             let (x, y) = (side(&bl, rs, re, ca), side(&bl, rs, re, cb));
-            if x == y { out.push_str(&x); } else {
+            let only_inserts = ca.iter().chain(cb.iter()).all(|c| c.s == c.e);
+            if x == y { out.push_str(&x); }
+            else if only_inserts {
+                // both sides added lines at the same point: keep both, yours first; nothing was overwritten
+                out.push_str(&with_newline(x));
+                out.push_str(&y);
+            } else {
                 conflicts += 1;
                 out.push_str("<<<<<<< yours\n");
                 out.push_str(&with_newline(x));
@@ -113,8 +120,7 @@ mod tests {
     #[test]
     fn insert_at_same_point_with_different_text() {
         let (m, c) = merge3("a\nc\n", "a\nmine\nc\n", "a\ntheirs\nc\n");
-        assert_eq!(c, 1);
-        assert_eq!(m, "a\n<<<<<<< yours\nmine\n=======\ntheirs\n>>>>>>> disk\nc\n");
+        assert_eq!((m.as_str(), c), ("a\nmine\ntheirs\nc\n", 0));
     }
 
     #[test]
@@ -151,8 +157,7 @@ mod tests {
         assert_eq!(merge3("", "", "t\n"), ("t\n".to_string(), 0));
         assert_eq!(merge3("", "m\n", ""), ("m\n".to_string(), 0));
         let (m, c) = merge3("", "m\n", "t\n");
-        assert_eq!(c, 1);
-        assert_eq!(m, "<<<<<<< yours\nm\n=======\nt\n>>>>>>> disk\n");
+        assert_eq!((m.as_str(), c), ("m\nt\n", 0));
     }
 
     #[test]
