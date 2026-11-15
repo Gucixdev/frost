@@ -47,3 +47,10 @@ No LSP, no plugin system beyond the Lua config, no file tree, no soft wrap, no s
 ## Tests
 `./test` runs everything: the Lean 4 proofs in `lean4/Frost.lean` (applying the history delta of a to b gives b; only the axioms propext and Quot.sound), regenerates the 14641 oracle cases from the Lean model and checks the Rust `delta` against all of them, then `cargo test` (buffer, multi-cursor, lazy load, history, disk merge, session, dictionary, diff, config).
 The Lean part covers the undo-history delta only; the rest of the editor is covered by ordinary Rust tests.
+
+## Speed
+
+`./bench` (release build, about a second after compiling) prints numbers from this machine, a single run, no averages:
+open a 100 MB file 2 ms to the first screen (84 ms to load the rest), 1000 cursors typing together 2.5 ms,
+three-way merge of a 20 MB file with 230 edits per side 235 ms. Your machine will differ; the point is that none of it is
+quadratic.

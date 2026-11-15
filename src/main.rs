@@ -9,6 +9,8 @@ mod history_store;
 mod keys;
 mod lang;
 mod merge;
+#[cfg(test)]
+mod bench;
 mod session;
 mod ui;
 
