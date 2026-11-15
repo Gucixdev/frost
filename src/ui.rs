@@ -159,13 +159,24 @@ fn status_bar(f: &mut Frame, app: &mut App, r: Rect) {
     }
     let i = app.active.min(app.tabs.len() - 1);
     let syn = app.hl.name_of(app.tabs[i].syntax);
+    let msg = app.msg_live().map(|m| m.to_string());
     let b = &app.tabs[i];
     let (l, c) = b.pos(b.primary().head);
-    let right = format!("{}  Ln {}, Col {}  {}  UTF-8  {}{}  ", if b.cursors.len() > 1 { format!("{} cursors", b.cursors.len()) } else { String::new() }, l + 1, c + 1, syn, if b.crlf { "CRLF" } else { "LF" }, b.load_pct().map(|p| format!("  loading {p}%")).unwrap_or_default());
-    let left = if app.msg.is_empty() { format!(" {}{}  (F1 keys, F10 menu)", b.name(), if b.modified { " [modified]" } else { "" }) } else { format!(" {}", app.msg) };
+    let sel: usize = b.cursors.iter().map(|c| c.end() - c.start()).sum();
+    let right = format!("{}{}  Ln {}, Col {}  {}  UTF-8  {}{}  ",
+        if b.cursors.len() > 1 { format!("{} cursors  ", b.cursors.len()) } else { String::new() },
+        if sel > 0 { format!("{sel} selected  ") } else { String::new() },
+        l + 1, c + 1, syn, if b.crlf { "CRLF" } else { "LF" }, b.load_pct().map(|p| format!("  loading {p}%")).unwrap_or_default());
+    let left = match &msg { Some(m) => format!(" {m}"), None => format!(" {}{}  (F1 keys, F10 menu)", b.name(), if b.modified { " [modified]" } else { "" }) };
     let w = r.width as usize;
+    // the message never pushes the right part off the screen: it is cut instead
+    let room = w.saturating_sub(right.chars().count());
+    let left: String = if left.chars().count() > room { left.chars().take(room.saturating_sub(1)).chain(std::iter::once('~')).collect() } else { left };
     let pad = w.saturating_sub(left.chars().count() + right.chars().count());
-    f.render_widget(Paragraph::new(format!("{left}{}{right}", " ".repeat(pad))).style(Style::default().bg(crate::config::theme().bar).fg(crate::config::theme().fg)), r);
+    let bar = Style::default().bg(crate::config::theme().bar).fg(crate::config::theme().fg);
+    // a message stands out from the idle file name
+    let left_style = if msg.is_some() { bar.add_modifier(Modifier::BOLD) } else { bar };
+    f.render_widget(Paragraph::new(Line::from(vec![Span::styled(left, left_style), Span::raw(" ".repeat(pad)), Span::raw(right)])).style(bar), r);
 }
 
 fn dropdown(f: &mut Frame, app: &mut App, mi: usize, bar: Rect) {
@@ -231,3 +242,43 @@ fn help(f: &mut Frame, area: Rect) {
     f.render_widget(Paragraph::new(HELP.replace(" | ", "\n\n")).wrap(Wrap { trim: true }), inner);
 }
 
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::app::App;
+    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+    use ratatui::{backend::TestBackend, Terminal};
+
+    fn rows(t: &Terminal<TestBackend>) -> Vec<String> {
+        let b = t.backend().buffer();
+        (0..b.area.height).map(|y| (0..b.area.width).map(|x| b[(x, y)].symbol().to_string()).collect()).collect()
+    }
+
+    #[test]
+    fn a_message_lives_in_the_status_bar_and_never_covers_the_text() {
+        let mut app = App::blank();
+        app.buf().insert("line one\nline two\nline three");
+        let mut t = Terminal::new(TestBackend::new(70, 10)).unwrap();
+        t.draw(|f| draw(f, &mut app)).unwrap();
+        let before = rows(&t);
+        app.on_key(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::CONTROL));
+        app.on_key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL));
+        t.draw(|f| draw(f, &mut app)).unwrap();
+        let after = rows(&t);
+        let last = after.len() - 1;
+        assert!(after[last].contains("copied 3 lines"), "{:?}", after[last]);
+        assert!(after[last].contains("Ln 3"), "the cursor position stays visible: {:?}", after[last]);
+        assert_eq!(&before[2..last], &after[2..last], "no text row changed");
+    }
+
+    #[test]
+    fn a_long_message_is_cut_not_the_position() {
+        let mut app = App::blank();
+        app.msg = "x".repeat(200);
+        let mut t = Terminal::new(TestBackend::new(60, 6)).unwrap();
+        t.draw(|f| draw(f, &mut app)).unwrap();
+        let last = rows(&t).pop().unwrap();
+        assert!(last.contains("Ln 1, Col 1") && last.contains('~'), "{last:?}");
+    }
+}

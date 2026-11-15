@@ -84,12 +84,16 @@ pub struct App {
     pub picker: Option<Picker>,
     pub menu: Option<usize>,
     pub msg: String,
+    /// when the current message appeared (it fades after a few seconds)
+    msg_t: Instant,
     pub quit: bool,
     pub line_numbers: bool,
     pub layout: Layout,
     pub show_help: bool,
     pub last_find: String,
     clip: String,
+    /// talk to wl-copy / xclip / ...: off in tests so they never touch the real clipboard
+    sys_clip: bool,
     dragging: bool,
     wheel_at: Option<std::time::Instant>,
     wheel_streak: u32,
@@ -142,12 +146,22 @@ fn get_system_clipboard() -> Option<String> {
 }
 
 impl App {
+    /// an app with one empty tab and no config, session or disk access (also what the tests use)
+    pub fn blank() -> App {
+        let mut app = App { tabs: vec![], active: 0, hl: Highlighter::new(), prompt: None, picker: None, menu: None, msg: String::new(), quit: false, line_numbers: true,
+                            layout: Layout::default(), show_help: false, last_find: String::new(), clip: String::new(), sys_clip: false, dragging: false, wheel_at: None, wheel_streak: 0, follow_sig: (usize::MAX, 0, 0),
+                            clicks: (Instant::now(), 0, 0, 0), confirm_quit: false, session_dir: PathBuf::new(), hl_key: (0, 0), closed: vec![], hover_row: None, keymap: Default::default(), dict: crate::dict::Dict::empty(), word_idx: Vec::new(), last_word: String::new(), persist: false, hist_written: Default::default(), disk_check: Instant::now(), msg_t: Instant::now() };
+        app.new_tab();
+        app
+    }
+
     pub fn new(files: &[String]) -> App {
         let cfg = crate::config::load();   // first: the theme decides which syntax colours the highlighter uses
-        let hl = Highlighter::new();
-        let mut app = App { tabs: vec![], active: 0, hl, prompt: None, picker: None, menu: None, msg: String::new(), quit: false, line_numbers: true,
-                            layout: Layout::default(), show_help: false, last_find: String::new(), clip: String::new(), dragging: false, wheel_at: None, wheel_streak: 0, follow_sig: (usize::MAX, 0, 0),
-                            clicks: (Instant::now(), 0, 0, 0), confirm_quit: false, session_dir: session::session_dir(), hl_key: (0, 0), closed: vec![], hover_row: None, keymap: Default::default(), dict: crate::dict::Dict::load(None), word_idx: Vec::new(), last_word: String::new(), persist: true, hist_written: Default::default(), disk_check: Instant::now() };
+        let mut app = App::blank();
+        app.tabs.clear();
+        app.sys_clip = true;
+        app.session_dir = session::session_dir();
+        app.dict = crate::dict::Dict::load(None);
         app.line_numbers = cfg.line_numbers;
         app.keymap = cfg.keys.iter().filter_map(|(k, v)| action_by_name(v).map(|a| (k.clone(), a))).collect();
         if cfg.dictionary.is_some() { app.dict = crate::dict::Dict::load(cfg.dictionary.clone()); }
@@ -166,6 +180,13 @@ impl App {
         }
         if app.tabs.is_empty() { app.new_tab(); }
         app
+    }
+
+    /// the message of the status bar while it is fresh; it fades after a few seconds (longer for longer text)
+    pub fn msg_live(&mut self) -> Option<&str> {
+        let ttl = Duration::from_millis(2500 + 60 * self.msg.chars().count() as u64);
+        if !self.msg.is_empty() && self.msg_t.elapsed() > ttl { self.msg.clear(); }
+        if self.msg.is_empty() { None } else { Some(&self.msg) }
     }
 
     pub fn buf(&mut self) -> &mut Buffer { let i = self.active.min(self.tabs.len() - 1); &mut self.tabs[i] }
@@ -252,7 +273,7 @@ impl App {
         // files changed by something else: one stat per tab per second
         if self.disk_check.elapsed() >= Duration::from_secs(1) {
             self.disk_check = Instant::now();
-            for t in &mut self.tabs { if let Some(m) = t.sync_disk() { self.msg = m; } }
+            for t in &mut self.tabs { if let Some(m) = t.sync_disk() { self.msg = m; self.msg_t = Instant::now(); } }
         }
         busy
     }
@@ -292,15 +313,14 @@ impl App {
     }
 
     // ---------------------------------------------------------------- clipboard
-    fn copy_text(&mut self, t: String) { set_system_clipboard(&t); self.clip = t; }
+    fn copy_text(&mut self, t: String) { if self.sys_clip { set_system_clipboard(&t); } self.clip = t; }
     fn paste_text(&mut self) -> String {
-        match get_system_clipboard() { Some(s) if !s.is_empty() => s, _ => self.clip.clone() }
+        match if self.sys_clip { get_system_clipboard() } else { None } { Some(s) if !s.is_empty() => s, _ => self.clip.clone() }
     }
 
     // ---------------------------------------------------------------- actions
     pub fn run(&mut self, a: Action) {
         self.menu = None;
-        self.msg.clear();
         match a {
             Action::New => self.new_tab(),
             Action::Open => self.prompt = Some(Prompt { kind: PromptKind::Open, label: "Open:".into(), input: String::new(), aux: String::new() }),
@@ -362,11 +382,21 @@ impl App {
                 // the session keeps unsaved work, so quitting never loses anything - say so instead of nagging
                 self.quit = true;
             }
-            Action::Undo => self.buf().undo(),
-            Action::Redo => self.buf().redo(),
-            Action::Cut => { let t = self.buf().cut(); self.copy_text(t); }
-            Action::Copy => { let t = self.buf().selected_text(); self.copy_text(t); }
-            Action::Paste => { let t = self.paste_text(); self.buf().paste(&t); }
+            Action::Undo => self.msg = if self.buf().undo() { "undone".into() } else { "nothing to undo".into() },
+            Action::Redo => self.msg = if self.buf().redo() { "redone".into() } else { "nothing to redo".into() },
+            Action::Cut => {
+                let what = self.buf().copy_kind();
+                let t = self.buf().cut();
+                self.msg = format!("cut {}", what.describe(&t));
+                self.copy_text(t);
+            }
+            Action::Copy => {
+                let what = self.buf().copy_kind();
+                let t = self.buf().selected_text();
+                self.msg = format!("copied {}", what.describe(&t));
+                self.copy_text(t);
+            }
+            Action::Paste => { let t = self.paste_text(); self.paste(&t); }
             Action::SelectAll => self.buf().select_all(),
             Action::DuplicateLine => self.buf().duplicate_lines(),
             Action::DeleteLine => self.buf().delete_lines(),
@@ -395,6 +425,15 @@ impl App {
             Action::ToggleLineNumbers => self.line_numbers = !self.line_numbers,
             Action::Help => self.show_help = !self.show_help,
         }
+    }
+
+    /// paste `t` at every cursor and say what happened
+    pub fn paste(&mut self, t: &str) {
+        if t.is_empty() { self.msg = "nothing to paste".into(); return; }
+        let b = self.buf();
+        let n = b.cursors.len();
+        let spread = b.paste(t);
+        self.msg = if spread { format!("pasted {} lines, one per cursor", n) } else if n > 1 { format!("pasted {} at {n} cursors", amount(t)) } else { format!("pasted {}", amount(t)) };
     }
 
     fn save_active(&mut self) {
@@ -427,8 +466,17 @@ impl App {
     }
 
     // ---------------------------------------------------------------- keyboard
+    /// run `f`; a message it sets restarts the fade timer, otherwise the previous message keeps counting down
+    fn keeping_msg(&mut self, f: impl FnOnce(&mut Self)) {
+        let old = std::mem::take(&mut self.msg);
+        f(self);
+        if self.msg.is_empty() { self.msg = old; } else { self.msg_t = Instant::now(); }
+    }
+
+    pub fn on_paste(&mut self, t: &str) { self.keeping_msg(|a| a.paste(t)); }
+
     pub fn on_key(&mut self, k: KeyEvent) {
-        self.on_key_inner(k);
+        self.keeping_msg(|a| a.on_key_inner(k));
         if self.picker.is_none() && !self.word_idx.is_empty() { self.word_idx = Vec::new(); }
     }
 
@@ -718,7 +766,9 @@ impl App {
         b.idx(line, col)
     }
 
-    pub fn on_mouse(&mut self, m: MouseEvent) {
+    pub fn on_mouse(&mut self, m: MouseEvent) { self.keeping_msg(|a| a.on_mouse_inner(m)); }
+
+    fn on_mouse_inner(&mut self, m: MouseEvent) {
         let (x, y) = (m.column, m.row);
         match m.kind {
             MouseEventKind::Down(MouseButton::Left) => {
@@ -816,6 +866,14 @@ impl App {
     }
 }
 
+/// "12 chars", "1 line", "3 lines": what a piece of text amounts to
+pub fn amount(t: &str) -> String {
+    let lines = t.lines().count();
+    if t.contains('\n') && lines > 1 || t.ends_with('\n') { return format!("{lines} line{}", if lines == 1 { "" } else { "s" }); }
+    let n = t.chars().count();
+    format!("{n} char{}", if n == 1 { "" } else { "s" })
+}
+
 /// screen column of char column `c` in a line (tabs are 4 wide)
 pub fn display_col(line: &str, c: usize) -> usize {
     let mut d = 0;
@@ -867,4 +925,116 @@ mod key_tests {
 fn self_open(app: &mut App, path: &str, line: usize) {
     app.open_path(PathBuf::from(path));
     if line > 0 { app.buf().goto_line(line); }
+}
+
+#[cfg(test)]
+mod msg_tests {
+    use super::*;
+
+    fn app(text: &str) -> App {
+        let mut a = App::blank();
+        a.tabs[0] = Buffer::from_text(text, None);
+        a
+    }
+    fn sel(a: &mut App, from: usize, to: usize) { a.buf().cursors = vec![crate::buffer::Cursor { head: to, anchor: from, want: None }]; }
+
+    #[test]
+    fn amounts() {
+        assert_eq!(amount("a"), "1 char");
+        assert_eq!(amount("abc"), "3 chars");
+        assert_eq!(amount("a\n"), "1 line");
+        assert_eq!(amount("a\nb\n"), "2 lines");
+        assert_eq!(amount("a\nb"), "2 lines");
+        assert_eq!(amount("zażółć"), "6 chars");
+    }
+
+    #[test]
+    fn copy_cut_paste_say_what_they_did() {
+        let mut a = app("hello world\nsecond");
+        sel(&mut a, 0, 5);
+        a.run(Action::Copy);
+        assert_eq!(a.msg, "copied 5 chars");
+        a.run(Action::Cut);
+        assert_eq!(a.msg, "cut 5 chars");
+        assert_eq!(a.buf().contents(), " world\nsecond");
+        a.buf().collapse();
+        a.run(Action::Paste);
+        assert_eq!(a.msg, "pasted 5 chars");
+        assert_eq!(a.buf().contents(), "hello world\nsecond");
+        a.buf().cursors = vec![crate::buffer::Cursor::at(2)];
+        a.run(Action::Copy);
+        assert_eq!(a.msg, "copied 1 line");
+        a.run(Action::Cut);
+        assert_eq!(a.msg, "cut 1 line");
+    }
+
+    #[test]
+    fn multi_cursor_copy_and_paste_messages() {
+        let mut a = app("aa bb cc");
+        a.buf().cursors = vec![crate::buffer::Cursor { head: 2, anchor: 0, want: None }, crate::buffer::Cursor { head: 8, anchor: 6, want: None }];
+        a.run(Action::Copy);
+        assert_eq!(a.msg, "copied 2 selections");
+        a.buf().collapse();
+        a.buf().cursors = vec![crate::buffer::Cursor::at(2), crate::buffer::Cursor::at(5)];
+        a.run(Action::Paste);
+        assert_eq!(a.msg, "pasted 2 lines, one per cursor");
+        assert_eq!(a.buf().contents(), "aaaa bbcc cc");
+    }
+
+    #[test]
+    fn nothing_to_paste_and_undo_redo() {
+        let mut a = app("x");
+        a.run(Action::Paste);
+        assert_eq!(a.msg, "nothing to paste");
+        a.run(Action::Undo);
+        assert_eq!(a.msg, "nothing to undo");
+        a.buf().insert("y");
+        a.run(Action::Undo);
+        assert_eq!(a.msg, "undone");
+        a.run(Action::Redo);
+        assert_eq!(a.msg, "redone");
+        a.run(Action::Redo);
+        assert_eq!(a.msg, "nothing to redo");
+    }
+
+    #[test]
+    fn saved_message_names_the_file() {
+        let p = std::env::temp_dir().join(format!("frost-msg-{}.txt", std::process::id()));
+        let mut a = app("data\n");
+        a.buf().path = Some(p.clone());
+        a.run(Action::Save);
+        assert!(a.msg.starts_with("saved frost-msg-"), "{}", a.msg);
+        let _ = std::fs::remove_file(&p);
+    }
+
+    #[test]
+    fn messages_fade_and_a_repeat_restarts_the_clock() {
+        let mut a = app("abc");
+        a.on_key(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::CONTROL));   // select all
+        a.on_key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL));
+        assert_eq!(a.msg_live(), Some("copied 3 chars"));
+        a.msg_t = Instant::now() - Duration::from_secs(2);
+        assert!(a.msg_live().is_some(), "still there after 2 s");
+        // typing does not clear it early and does not keep it alive either
+        a.on_key(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE));
+        assert_eq!(a.msg, "copied 3 chars");
+        a.msg_t = Instant::now() - Duration::from_secs(10);
+        assert_eq!(a.msg_live(), None, "faded");
+        // the same message again is fresh again
+        a.on_key(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::CONTROL));
+        a.on_key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL));
+        assert!(a.msg_live().is_some());
+        a.msg_t = Instant::now() - Duration::from_secs(10);
+        a.on_key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL));
+        assert!(a.msg_t.elapsed() < Duration::from_secs(1));
+    }
+
+    #[test]
+    fn bracketed_paste_reports_too() {
+        let mut a = app("");
+        a.on_paste("one\ntwo\n");
+        assert_eq!(a.msg, "pasted 2 lines");
+        a.on_paste("");
+        assert_eq!(a.msg, "nothing to paste");
+    }
 }

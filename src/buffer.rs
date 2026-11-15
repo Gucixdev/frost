@@ -50,6 +50,17 @@ const KEEP: usize = 3000;
 /// uncompressed budget for one tab's saved steps
 const HIST_MAX_BYTES: usize = 32 << 20;
 
+/// what a copy or cut took, for the status message
+pub enum CopyKind { Lines, Selections(usize) }
+impl CopyKind {
+    pub fn describe(&self, t: &str) -> String {
+        match self {
+            CopyKind::Selections(n) if *n > 1 => format!("{n} selections"),
+            _ => crate::app::amount(t),
+        }
+    }
+}
+
 #[derive(Clone)]
 struct Snap { text: Rope, cursors: Vec<Cursor> }
 
@@ -335,19 +346,21 @@ impl Buffer {
     }
 
     pub fn break_undo(&mut self) { self.last_kind = ""; }
-    pub fn undo(&mut self) {
+    /// false when there is nothing to undo
+    pub fn undo(&mut self) -> bool {
         self.hist_gen += 1;
-        if let Some(s) = self.undo.pop() {
-            self.redo.push(Snap { text: self.text.clone(), cursors: self.cursors.clone() });
-            self.restore(s);
-        }
+        let Some(s) = self.undo.pop() else { return false };
+        self.redo.push(Snap { text: self.text.clone(), cursors: self.cursors.clone() });
+        self.restore(s);
+        true
     }
-    pub fn redo(&mut self) {
+    /// false when there is nothing to redo
+    pub fn redo(&mut self) -> bool {
         self.hist_gen += 1;
-        if let Some(s) = self.redo.pop() {
-            self.undo.push(Snap { text: self.text.clone(), cursors: self.cursors.clone() });
-            self.restore(s);
-        }
+        let Some(s) = self.redo.pop() else { return false };
+        self.undo.push(Snap { text: self.text.clone(), cursors: self.cursors.clone() });
+        self.restore(s);
+        true
     }
     fn restore(&mut self, s: Snap) {
         self.text = s.text;
@@ -380,6 +393,7 @@ impl Buffer {
             }
         }
         self.cursors = cs;
+        self.normalize();
         self.touched(first);
     }
 
@@ -395,7 +409,8 @@ impl Buffer {
     }
 
     /// Paste: with as many clipboard lines as cursors each cursor gets one line, otherwise everyone gets the whole text.
-    pub fn paste(&mut self, s: &str) {
+    /// True when the lines were spread one per cursor.
+    pub fn paste(&mut self, s: &str) -> bool {
         let parts: Vec<String> = s.lines().map(|l| l.to_string()).collect();
         if self.cursors.len() > 1 && parts.len() == self.cursors.len() {
             self.checkpoint("paste");
@@ -413,10 +428,13 @@ impl Buffer {
                 for c in cs.iter_mut().skip(i + 1) { c.head = (c.head as isize + delta) as usize; c.anchor = (c.anchor as isize + delta) as usize; }
             }
             self.cursors = cs;
+            self.normalize();
             self.touched(first);
+            true
         } else {
             let s = s.replace("\r\n", "\n");
             self.edit_each("paste", &move |_| s.clone());
+            false
         }
     }
 
@@ -549,11 +567,18 @@ impl Buffer {
         cs.sort_by_key(|c| c.start());
         let parts: Vec<String> = cs.iter().filter(|c| c.has_sel()).map(|c| self.text.slice(c.start()..c.end()).to_string()).collect();
         if parts.is_empty() {
-            // micro: copy with no selection copies the line
-            let l = self.text.char_to_line(self.primary().head);
-            return format!("{}\n", self.line_string(l));
+            // micro: copy with no selection copies the line (the line of every cursor, once each)
+            let mut ls: Vec<usize> = cs.iter().map(|c| self.text.char_to_line(c.head)).collect();
+            ls.dedup();
+            return ls.iter().map(|&l| format!("{}\n", self.line_string(l))).collect();
         }
         parts.join("\n")
+    }
+
+    /// what Ctrl-C / Ctrl-X would take: whole lines (nothing selected) or the selections
+    pub fn copy_kind(&self) -> CopyKind {
+        let n = self.cursors.iter().filter(|c| c.has_sel()).count();
+        if n == 0 { CopyKind::Lines } else { CopyKind::Selections(n) }
     }
 
     pub fn cut(&mut self) -> String {

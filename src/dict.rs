@@ -10,6 +10,8 @@ pub struct Dict {
 }
 
 impl Dict {
+    pub fn empty() -> Dict { Dict { entries: vec![] } }
+
     pub fn load(extra: Option<PathBuf>) -> Dict {
         let mut d = Dict { entries: vec![] };
         d.add_text(include_str!("../data/dictionary.tsv"));

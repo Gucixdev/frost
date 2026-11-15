@@ -81,7 +81,7 @@ fn main() -> io::Result<()> {
                 match event::read()? {
                     Event::Key(k) if k.kind != KeyEventKind::Release => app.on_key(k),
                     Event::Mouse(m) => app.on_mouse(m),
-                    Event::Paste(s) => app.buf().paste(&s),
+                    Event::Paste(s) => app.on_paste(&s),
                     _ => {}
                 }
                 // drain what is already waiting (fast typing, pastes) before drawing again
@@ -89,7 +89,7 @@ fn main() -> io::Result<()> {
                     match event::read()? {
                         Event::Key(k) if k.kind != KeyEventKind::Release => app.on_key(k),
                         Event::Mouse(m) => app.on_mouse(m),
-                        Event::Paste(s) => app.buf().paste(&s),
+                        Event::Paste(s) => app.on_paste(&s),
                         _ => {}
                     }
                 }
