@@ -133,7 +133,8 @@ fn brackets(cs: &[char], lang: &Lang) -> Vec<(usize, char)> {
 }
 
 /// match brackets with a stack; returns the pairs and what is left over
-fn pair_up(bs: &[(usize, char)]) -> (HashMap<usize, usize>, Vec<(usize, char)>, Vec<(usize, char)>) {
+type Brackets = Vec<(usize, char)>;
+fn pair_up(bs: &[(usize, char)]) -> (HashMap<usize, usize>, Brackets, Brackets) {
     let (mut partner, mut stack, mut stray) = (HashMap::new(), Vec::<(usize, char)>::new(), vec![]);
     for &(p, c) in bs {
         match opener_of(c) {

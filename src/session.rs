@@ -2,7 +2,6 @@ use std::fs;
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use serde::{Serialize, Deserialize};
-use serde_json;
 
 #[derive(Serialize, Deserialize, Clone, Default, Debug, PartialEq)]
 pub struct TabState {

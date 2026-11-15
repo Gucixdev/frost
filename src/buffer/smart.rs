@@ -79,7 +79,7 @@ impl Buffer {
             let word = |c: Option<char>| c.is_some_and(is_word);
             if (closes || quotes) && skips(text, e, ch) { return Edit { start: s, end: e + 1, text: ch.to_string(), head: 1, anchor: 1 }; }
             if opens && (lang.strict || !word(next)) { return plain(format!("{ch}{closer}"), 1); }
-            if quotes && !word(prev) && !word(next) && prev != Some(ch) && prev != Some('\\') && quotes_before(text, s, ch) % 2 == 0 {
+            if quotes && !word(prev) && !word(next) && prev != Some(ch) && prev != Some('\\') && quotes_before(text, s, ch).is_multiple_of(2) {
                 return plain(format!("{ch}{ch}"), 1);
             }
             if closes && !matches!(lang.kind, Kind::Lisp | Kind::Prose) {

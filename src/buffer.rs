@@ -221,7 +221,7 @@ impl Buffer {
     pub fn save(&mut self) -> std::io::Result<()> {
         use std::io::Write;
         self.ensure_loaded();
-        let p = self.path.clone().ok_or_else(|| std::io::Error::new(std::io::ErrorKind::Other, "no file name"))?;
+        let p = self.path.clone().ok_or_else(|| std::io::Error::other("no file name"))?;
         // whatever changed on disk since the last sync is merged in first, so this save cannot overwrite it
         self.sync_disk();
         if self.conflict {
@@ -308,7 +308,7 @@ impl Buffer {
         if self.undo.len() <= KEEP { return; }
         let half = self.undo.len() / 2;
         let mut i = 0;
-        self.undo.retain(|_| { i += 1; i - 1 >= half || (i - 1) % 2 == 0 });
+        self.undo.retain(|_| { i += 1; i > half || (i - 1) % 2 == 0 });
     }
 
     /// The full history for the session file, or None when there is none or it is too big to be worth saving.
@@ -501,7 +501,10 @@ impl Buffer {
             self.text.remove(s..e);
             first = first.min(a);
             self.shift_after(e, -((e - s) as isize));
-            for c in self.cursors.iter_mut() { if c.head > s && c.head < e { c.head = s; } if c.anchor > s && c.anchor < e { c.anchor = s; } }
+            for c in self.cursors.iter_mut() {
+                if c.head > s && c.head < e { c.head = s; }
+                if c.anchor > s && c.anchor < e { c.anchor = s; }
+            }
         }
         for c in self.cursors.iter_mut() { c.anchor = c.head; }
         self.touched(first);
@@ -706,7 +709,7 @@ impl Buffer {
             let hs = hits(l);
             let ok = |p: usize| if step == 0 { if forward { p >= from } else { p < from } } else if step == total { if forward { p < from } else { p >= from } } else { true };
             let mut it = hs.into_iter().map(|p| base + p).filter(|&p| ok(p));
-            let pick = if forward { it.next() } else { it.last() };
+            let pick = if forward { it.next() } else { it.next_back() };
             if let Some(p) = pick { return Some((p, p + n)); }
         }
         None

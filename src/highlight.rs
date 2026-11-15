@@ -56,8 +56,8 @@ impl Highlighter {
     /// text changed at `line`: checkpoints that start after it are stale
     pub fn invalidate_from(&mut self, line: usize) {
         let keep = line / CHECK + 1; // the checkpoint at k*CHECK <= line still starts before the change
-        let keep = if line % CHECK == 0 && line > 0 { line / CHECK } else { keep };
-        self.checks.truncate(keep.max(0));
+        let keep = if line.is_multiple_of(CHECK) && line > 0 { line / CHECK } else { keep };
+        self.checks.truncate(keep);
         if line == 0 { self.checks.clear(); }
     }
 
@@ -95,7 +95,7 @@ impl Highlighter {
             if !jump && ln % CHECK == 0 && ln / CHECK == self.checks.len() { self.checks.push((ps.clone(), hs.clone())); }
             let mut line = get_line(ln);
             line.push('\n');
-            let ops = match ps.parse_line(&line, &self.ss) { Ok(o) => o, Err(_) => vec![] };
+            let ops = ps.parse_line(&line, &self.ss).unwrap_or_default();
             if ln >= first {
                 let mut spans: Vec<(Style, String)> = HighlightIterator::new(&mut hs, &ops, &line, &hi)
                     .map(|(s, t)| (Self::style(s), t.to_string())).collect();
