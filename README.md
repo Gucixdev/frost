@@ -12,7 +12,9 @@ CUA clipboard, mouse, multi-cursor, and Notepad++-style sessions. About 2000 lin
 
 ## What it has
 - **Keys (CUA + micro):** Ctrl-S/O/N/W/Q, Ctrl-Z/Y, Ctrl-X/C/V (system clipboard), Ctrl-A, Ctrl-F (live search) F3/Shift-F3, Ctrl-H replace all, Ctrl-G line, Ctrl-K delete line, Ctrl-Shift-D duplicate, Tab/Shift-Tab indent, Ctrl-P command palette, F1 keys, F10 menu.
-- **Key hints:** the bottom line shows the keys that matter right now (idle, selection, several cursors, search, menus, pickers) and gives way to a short message (`copied 3 lines`, `pasted`, `saved`, `nothing to undo`) that fades. F1 opens the full list: type to filter, Enter runs the command. Dispatch, menus, hints and the list all come from one table (`src/keys.rs`); in init.lua `frost.keys["ctrl-k"] = "none"` unbinds a key.
+- **Key hints:** the bottom line shows the keys that matter right now (idle, selection, several cursors, search, menus, pickers) and gives way to a short message (`copied 3 lines`, `pasted`, `saved`, `nothing to undo`) that fades. Dispatch, menus, hints and the key panel all come from one table (`src/keys.rs`), so none of them can disagree.
+- **Tabs from the keyboard:** Alt-. / Alt-, (or Ctrl-PgDn / Ctrl-PgUp) next and previous, Alt-1 to Alt-9 go to that tab, Alt-0 to the last one.
+- **Key panel (F1):** every action with its keys, `(none)` if unbound. Type to filter; Enter on a row, then press the new key (it replaces the old ones); Ins adds a second key, Del unbinds, Ctrl-R restores the default. A key another action already has is shown and taken only when you press it a second time. Changes apply at once and are saved to `keys.lua` next to init.lua (it holds only the differences from the table and is read after init.lua; delete it to start over). A bare letter cannot be bound, it would stop typing.
 - **Mouse:** click, drag, double-click word, triple-click line, wheel, tabs, menus (they open when you point at them, like Fresh), Alt/Ctrl-click adds a cursor.
 - **Multi-cursor:** Ctrl-D selects the word, then the next occurrence each press (a whole word stays a whole word, wraps around); Alt-A all occurrences, Alt-S skip one, Ctrl-U drop the newest cursor, Alt-L one cursor per selected line, Alt-Up/Down a cursor above/below, Alt-click adds or removes one. Every edit (each cursor keeps its own indent on Enter), copy/cut/paste (each cursor gets its own piece back) and delete works at all cursors; cursors that collide merge; Esc goes back to one.
 - **Huge files:** a file over 8 MB shows its first screen at once (about 150 ms for 811 MB / 10 M lines on 12 cores) while all cores stream the rest in; the status bar shows `loading NN%`. Memory is about 1.4x the text, not 2x. Search works line by line, saving streams to disk. The first edit waits for the load to finish. Far jumps do not re-parse the highlighting. Not tried above ~2.4 GB.
@@ -34,7 +36,7 @@ frost.line_numbers = true
 frost.tab_width = 4               -- display width of a tab, and the indent when a file has none yet
 frost.auto_pair = true             -- see docs/brackets.md for frost.pairs and frost.strict
 frost.dictionary = "/path/to/words.tsv"
-frost.keys["ctrl-j"] = "goto"      -- key spec -> action name (save, quit, undo, find, define, difftab, ...)
+frost.keys["ctrl-j"] = "goto"      -- key spec -> action name (save, quit, tab3, find, ...) or "none"
 ```
 A broken file shows its error in the status line and the defaults are used. In the default `terminal` theme everything, syntax colours included, uses the terminal's palette (ANSI), so frost matches your terminal theme.
 
@@ -46,6 +48,7 @@ No LSP, no plugin system beyond the Lua config, no file tree, no soft wrap, no s
 
 ## Tests
 `./test` runs everything: the Lean 4 proofs in `lean4/Frost.lean` (applying the history delta of a to b gives b; only the axioms propext and Quot.sound), regenerates the 14641 oracle cases from the Lean model and checks the Rust `delta` against all of them, then `cargo test` (buffer, multi-cursor, lazy load, history, disk merge, session, dictionary, diff, config).
+`tests/keypanel` then drives the real binary in a private tmux (own HOME and XDG dirs): tab keys, the F1 panel, keys.lua, a restart.
 The Lean part covers the undo-history delta only; the rest of the editor is covered by ordinary Rust tests.
 
 ## Speed

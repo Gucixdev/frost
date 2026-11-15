@@ -261,13 +261,22 @@ fn picker(f: &mut Frame, app: &mut App, area: Rect) {
     let w = if pk.kind == crate::app::PickerKind::Keys { (pk.items.iter().map(|i| i.chars().count()).max().unwrap_or(0) as u16 + 6).clamp(68, 100) } else { 56 };
     let rect = centered(area, w, h);
     f.render_widget(Clear, rect);
-    let title = match pk.kind { crate::app::PickerKind::Palette => " Command palette ", crate::app::PickerKind::Language => " Language ", crate::app::PickerKind::Sessions => " Sessions ", crate::app::PickerKind::Closed => " Closed tabs ", crate::app::PickerKind::DiffTab => " Compare with ", crate::app::PickerKind::Word => " Jump to word (buffer + dictionary) ", crate::app::PickerKind::Keys => " Keys (type to filter, Enter runs) " };
+    let title = match pk.kind { crate::app::PickerKind::Palette => " Command palette ", crate::app::PickerKind::Language => " Language ", crate::app::PickerKind::Sessions => " Sessions ", crate::app::PickerKind::Closed => " Closed tabs ", crate::app::PickerKind::DiffTab => " Compare with ", crate::app::PickerKind::Word => " Jump to word (buffer + dictionary) ", crate::app::PickerKind::Keys => " Keys (type to filter, Enter changes a key) " };
     let block = Block::default().borders(Borders::ALL).title(title).border_style(Style::default().fg(crate::config::theme().accent)).style(Style::default().bg(crate::config::theme().bar).fg(crate::config::theme().fg));
     let inner = block.inner(rect);
     f.render_widget(block, rect);
     let rows = inner.height.saturating_sub(1) as usize;
     let first = pk.sel.saturating_sub(rows.saturating_sub(1));
     let mut lines = vec![Line::from(vec![Span::styled("> ", Style::default().fg(crate::config::theme().accent)), Span::raw(pk.filter.clone())])];
+    // the key panel waiting for a key: the filter line becomes the question
+    if let Some(rb) = &app.rebind {
+        let what = crate::keys::desc(rb.act);
+        let q = match &rb.pending {
+            Some(k) => format!("{} already means \"{}\": press it again to take it, Esc cancels", crate::keys::label(k), rb.pending.as_deref().and_then(|k| app.keymap.get(k)).map_or("?", |o| crate::keys::desc(*o))),
+            None => format!("press the {} key for \"{what}\" (Esc cancels)", if rb.add { "extra" } else { "new" }),
+        };
+        lines = vec![Line::styled(format!(" {q}"), Style::default().fg(crate::config::theme().accent).add_modifier(Modifier::BOLD))];
+    }
     for (n, &i) in shown.iter().enumerate().skip(first).take(rows) {
         let st = if n == pk.sel { crate::config::accent_style() } else { Style::default() };
         // Language list is alphabetical: show the initial letter in a margin where a new letter starts
@@ -279,7 +288,7 @@ fn picker(f: &mut Frame, app: &mut App, area: Rect) {
         lines.push(Line::styled(format!(" {} {}", mark, pk.items[i]), st));
     }
     f.render_widget(Paragraph::new(lines), inner);
-    f.set_cursor_position((inner.x + 2 + pk.filter.chars().count() as u16, inner.y));
+    if app.rebind.is_none() { f.set_cursor_position((inner.x + 2 + pk.filter.chars().count() as u16, inner.y)); }
     app.layout.picker = Some(rect);
 }
 
@@ -351,17 +360,27 @@ mod tests {
     }
 
     #[test]
-    fn f1_lists_the_keys_and_enter_runs_the_command() {
+    fn f1_is_the_key_panel() {
         let mut app = App::blank();
         app.on_key(KeyEvent::new(KeyCode::F(1), KeyModifiers::NONE));
-        let mut t = Terminal::new(TestBackend::new(80, 30)).unwrap();
+        let mut t = Terminal::new(TestBackend::new(90, 40)).unwrap();
         t.draw(|f| draw(f, &mut app)).unwrap();
         let screen = rows(&t).join("\n");
-        assert!(screen.contains("Keys") && screen.contains("Ctrl-S") && screen.contains("Save") && screen.contains("-- File"), "{screen}");
-        // typing filters the list; Enter on a command runs it
+        assert!(screen.contains("Keys") && screen.contains("Ctrl-S") && screen.contains("Save") && screen.contains("-- File") && screen.contains("(none)"), "{screen}");
+        let status = rows(&t).pop().unwrap();
+        assert!(status.contains("Enter rebind") && status.contains("Ins add key") && status.contains("Del unbind"), "{status:?}");
+        // typing filters the list; Enter asks for the new key and shows the question in the panel
         for c in "palette".chars() { app.on_key(key(c, KeyModifiers::NONE)); }
         app.on_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
-        assert!(app.picker.as_ref().map_or(false, |p| p.kind == crate::app::PickerKind::Palette), "the palette opened");
+        t.draw(|f| draw(f, &mut app)).unwrap();
+        let screen = rows(&t).join("\n");
+        assert!(screen.contains("press the new key for \"Command palette\""), "{screen}");
+        assert!(rows(&t).pop().unwrap().contains("Esc cancel"));
+        app.on_key(key('o', KeyModifiers::ALT));
+        t.draw(|f| draw(f, &mut app)).unwrap();
+        let screen = rows(&t).join("\n");
+        assert!(screen.contains("Alt-O") && !screen.contains("press the new key"), "{screen}");
+        assert_eq!(app.keymap["alt-o"], crate::app::Action::Palette);
     }
 
     #[test]

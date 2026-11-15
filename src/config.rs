@@ -1,4 +1,5 @@
-//! Configuration is a Lua file, ~/.config/frost/init.lua (XDG_CONFIG_HOME, %APPDATA%\frost, ~/Library/Application Support/frost).
+//! Configuration is a Lua file, ~/.config/frost/init.lua (XDG_CONFIG_HOME, %APPDATA%\frost, ~/Library/Application Support/frost),
+//! plus keys.lua next to it, which the key panel writes.
 //! It runs once at start with a global table `frost`; nothing else is exposed.
 use ratatui::style::Color;
 use std::collections::HashMap;
@@ -63,18 +64,46 @@ pub fn config_dir() -> PathBuf {
     match std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE")) { Some(h) => PathBuf::from(h).join(".config/frost"), None => PathBuf::from(".frost-config") }
 }
 
+/// keys.lua: what the key panel (F1) saved; loaded after init.lua, so it has the last word
+pub fn keys_file() -> PathBuf { config_dir().join("keys.lua") }
+
+/// replace keys.lua (written next to it and renamed, so a crash never leaves half a file)
+pub fn write_keys(path: &std::path::Path, text: &str) -> std::io::Result<()> {
+    if let Some(d) = path.parent() { std::fs::create_dir_all(d)?; }
+    let tmp = path.with_extension("lua.tmp");
+    std::fs::write(&tmp, text)?;
+    std::fs::rename(&tmp, path)
+}
+
+fn fresh_config() -> Config { Config { pairing: Pairing::default(), theme: preset("terminal"), line_numbers: true, keys: HashMap::new(), dictionary: None, error: None } }
+
+#[cfg(test)]
+pub fn test_config() -> Config { fresh_config() }
+
 pub fn load() -> Config {
-    let mut cfg = Config { pairing: Pairing::default(), theme: preset("terminal"), line_numbers: true, keys: HashMap::new(), dictionary: None, error: None };
-    let path = config_dir().join("init.lua");
-    if let Ok(src) = std::fs::read_to_string(&path) {
-        if let Err(e) = run(&src, &mut cfg) { cfg.error = Some(format!("init.lua: {}", e.to_string().lines().next().unwrap_or(""))); }
+    let mut cfg = fresh_config();
+    let (init, keys) = (std::fs::read_to_string(config_dir().join("init.lua")).ok(), std::fs::read_to_string(keys_file()).ok());
+    // keys.lua runs in the same Lua state after init.lua; an error in either shows in the status line
+    if init.is_some() || keys.is_some() {
+        let (i, k) = (init.as_deref().unwrap_or(""), keys.as_deref().unwrap_or(""));
+        if let Err(e) = run_chunks(&[i, k], &mut cfg) {
+            // one broken file must not take the other with it: use whichever still runs on its own
+            let mut other = fresh_config();
+            let which = if run_chunks(&[i], &mut other).is_ok() { other } else { let mut o = fresh_config(); let _ = run_chunks(&[k], &mut o); o };
+            cfg = which;
+            cfg.error = Some(format!("config: {}", e.to_string().lines().next().unwrap_or("")));
+        }
     }
     let _ = THEME.set(cfg.theme);
     let _ = PAIRING.set(cfg.pairing.clone());
     cfg
 }
 
-fn run(src: &str, cfg: &mut Config) -> mlua::Result<()> {
+#[cfg(test)]
+fn run(src: &str, cfg: &mut Config) -> mlua::Result<()> { run_chunks(&[src], cfg) }
+
+/// run the Lua chunks one after the other in one `frost` table (init.lua, then keys.lua), then read the result
+pub fn run_chunks(chunks: &[&str], cfg: &mut Config) -> mlua::Result<()> {
     use mlua::{Lua, Table, Value};
     let lua = Lua::new();
     let frost = lua.create_table()?;
@@ -87,7 +116,7 @@ fn run(src: &str, cfg: &mut Config) -> mlua::Result<()> {
     frost.set("pairs", lua.create_table()?)?;
     frost.set("strict", lua.create_table()?)?;
     lua.globals().set("frost", frost.clone())?;
-    lua.load(src).exec()?;
+    for src in chunks { lua.load(*src).exec()?; }
     cfg.line_numbers = frost.get::<bool>("line_numbers").unwrap_or(true);
     TAB.store(frost.get::<usize>("tab_width").unwrap_or(4).clamp(1, 16), Ordering::Relaxed);
     let mut t = preset(&frost.get::<String>("theme").unwrap_or_default());
@@ -109,10 +138,23 @@ fn run(src: &str, cfg: &mut Config) -> mlua::Result<()> {
     Ok(())
 }
 
+/// highlighted row / menu title: reverse video in the terminal theme (readable on any palette), accent colours otherwise
+pub fn accent_style() -> ratatui::style::Style {
+    use ratatui::style::{Modifier, Style};
+    let t = theme();
+    if t.terminal { Style::default().add_modifier(Modifier::REVERSED) } else { Style::default().bg(t.accent).fg(t.bg) }
+}
+/// second and further carets
+pub fn caret2_style() -> ratatui::style::Style {
+    use ratatui::style::{Modifier, Style};
+    let t = theme();
+    if t.terminal { Style::default().add_modifier(Modifier::REVERSED | Modifier::BOLD) } else { Style::default().bg(t.cursor2).fg(t.bg) }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    fn fresh() -> Config { Config { pairing: Pairing::default(), theme: preset("terminal"), line_numbers: true, keys: HashMap::new(), dictionary: None, error: None } }
+    fn fresh() -> Config { fresh_config() }
 
     #[test]
     fn lua_sets_options_theme_and_keys() {
@@ -131,7 +173,7 @@ mod tests {
         run("frost.auto_pair = false; frost.pairs['Rust'] = '([{'; frost.strict['Emacs Lisp'] = false", &mut c).unwrap();
         assert!(c.pairing.off);
         assert_eq!(c.pairing.pairs["rust"], "([{");
-        assert_eq!(c.pairing.strict["emacs lisp"], false);
+        assert!(!c.pairing.strict["emacs lisp"]);
         let mut d = fresh();
         run("", &mut d).unwrap();
         assert!(!d.pairing.off && d.pairing.pairs.is_empty());
@@ -142,17 +184,4 @@ mod tests {
         let mut c = fresh();
         assert!(run("frost.theme = = 1", &mut c).is_err());
     }
-}
-
-/// highlighted row / menu title: reverse video in the terminal theme (readable on any palette), accent colours otherwise
-pub fn accent_style() -> ratatui::style::Style {
-    use ratatui::style::{Modifier, Style};
-    let t = theme();
-    if t.terminal { Style::default().add_modifier(Modifier::REVERSED) } else { Style::default().bg(t.accent).fg(t.bg) }
-}
-/// second and further carets
-pub fn caret2_style() -> ratatui::style::Style {
-    use ratatui::style::{Modifier, Style};
-    let t = theme();
-    if t.terminal { Style::default().add_modifier(Modifier::REVERSED | Modifier::BOLD) } else { Style::default().bg(t.cursor2).fg(t.bg) }
 }

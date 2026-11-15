@@ -14,6 +14,7 @@ pub enum Action {
     New, Open, Save, SaveAs, Close, NextTab, PrevTab, Quit,
     Undo, Redo, Cut, Copy, Paste, SelectAll, DuplicateLine, DeleteLine, Indent, Unindent,
     Find, FindNext, FindPrev, Replace, Goto, NextOccurrence, SelectOccurrences, SkipOccurrence, UndoCursor, SplitLines, CursorUp, CursorDown, OneCursor,
+    Tab1, Tab2, Tab3, Tab4, Tab5, Tab6, Tab7, Tab8, Tab9, TabLast,
     Language, Define, WordJump, WordNext, WordPrev, DiffDisk, DiffTab, Palette, ReopenClosed, ClosedTabs, SaveSession, LoadSession, ToggleLineNumbers, Help, Menu,
     // keys that are not menu commands but live in the key table all the same (so they can be rebound and are listed by F1)
     Enter, Backspace, Delete, DeleteWord,
@@ -26,8 +27,11 @@ impl Action {
         use Action::*;
         matches!(self, Left | Right | Up | Down | WordLeft | WordRight | Up5 | Down5 | Home | End | DocStart | DocEnd | PageUp | PageDown)
     }
-    /// keys that edit or move as you type: the F1 list shows them but does not run them
-    pub fn is_typing(self) -> bool { self.is_motion() || matches!(self, Action::Enter | Action::Backspace | Action::Delete | Action::DeleteWord) }
+    /// "go to tab N" as an index (TabLast: usize::MAX, clamped by the caller)
+    pub fn tab_index(self) -> Option<usize> {
+        use Action::*;
+        Some(match self { Tab1 => 0, Tab2 => 1, Tab3 => 2, Tab4 => 3, Tab5 => 4, Tab6 => 5, Tab7 => 6, Tab8 => 7, Tab9 => 8, TabLast => usize::MAX, _ => return None })
+    }
 }
 
 pub const MENUS: &[(&str, &[(&str, Action)])] = &[
@@ -54,6 +58,13 @@ const PALETTE: &[(&str, Action)] = &[
     ("Add cursor above", Action::CursorUp), ("Add cursor below", Action::CursorDown), ("Single cursor", Action::OneCursor), ("Choose language", Action::Language),
     ("Define word", Action::Define), ("Jump to word", Action::WordJump), ("Next occurrence of word", Action::WordNext), ("Previous occurrence of word", Action::WordPrev), ("Diff with file on disk", Action::DiffDisk), ("Diff with another tab", Action::DiffTab), ("Reopen closed tab", Action::ReopenClosed), ("Closed tabs", Action::ClosedTabs), ("Save session as", Action::SaveSession), ("Load session", Action::LoadSession), ("Toggle line numbers", Action::ToggleLineNumbers), ("Keys", Action::Help),
 ];
+
+#[cfg(test)]
+pub fn palette_actions() -> impl Iterator<Item = Action> { PALETTE.iter().map(|p| p.1) }
+
+/// the key panel is waiting for a key press for `act` (`add`: keep its other keys). `pending` is a key that is taken by another
+/// action: the same key pressed again moves it here.
+pub struct Rebind { pub act: Action, pub add: bool, pub pending: Option<String> }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum PromptKind { Open, SaveAs, Find, Goto, ReplaceFind, ReplaceWith, SaveSession }
@@ -119,6 +130,9 @@ pub struct App {
     pub hover_row: Option<usize>,
     /// every bound key: the table in keys.rs with init.lua on top
     pub keymap: std::collections::HashMap<String, Action>,
+    /// where the key panel saves its changes (keys.lua); None = nowhere (tests)
+    pub keys_file: Option<PathBuf>,
+    pub rebind: Option<Rebind>,
     pub dict: crate::dict::Dict,
     /// unique words of the active buffer with the lines they occur on, alive only while the word-jump picker is open
     word_idx: Vec<(String, Vec<usize>)>,
@@ -163,7 +177,7 @@ impl App {
     pub fn blank() -> App {
         let mut app = App { tabs: vec![], active: 0, hl: Highlighter::new(), prompt: None, picker: None, menu: None, msg: String::new(), quit: false, line_numbers: true,
                             layout: Layout::default(), last_find: String::new(), clip: String::new(), sys_clip: false, dragging: false, wheel_at: None, wheel_streak: 0, follow_sig: (usize::MAX, 0, 0),
-                            clicks: (Instant::now(), 0, 0, 0), confirm_quit: false, session_dir: PathBuf::new(), hl_key: (0, 0), closed: vec![], hover_row: None, clip_parts: vec![], keymap: crate::keys::build(&Default::default()), dict: crate::dict::Dict::empty(), word_idx: Vec::new(), last_word: String::new(), persist: false, hist_written: Default::default(), disk_check: Instant::now(), msg_t: Instant::now() };
+                            clicks: (Instant::now(), 0, 0, 0), confirm_quit: false, session_dir: PathBuf::new(), hl_key: (0, 0), closed: vec![], hover_row: None, clip_parts: vec![], keymap: crate::keys::build(&Default::default()), keys_file: None, rebind: None, dict: crate::dict::Dict::empty(), word_idx: Vec::new(), last_word: String::new(), persist: false, hist_written: Default::default(), disk_check: Instant::now(), msg_t: Instant::now() };
         app.new_tab();
         app
     }
@@ -177,6 +191,7 @@ impl App {
         app.dict = crate::dict::Dict::load(None);
         app.line_numbers = cfg.line_numbers;
         app.keymap = crate::keys::build(&cfg.keys);
+        app.keys_file = Some(crate::config::keys_file());
         if cfg.dictionary.is_some() { app.dict = crate::dict::Dict::load(cfg.dictionary.clone()); }
         if let Some(e) = cfg.error { app.msg = e; }
         // Notepad++ model: the session is ALWAYS kept. Whatever is open (saved files, unsaved edits, untitled tabs) comes back on the
@@ -414,6 +429,10 @@ impl App {
             }
             Action::NextTab => self.active = (self.active + 1) % self.tabs.len(),
             Action::PrevTab => self.active = (self.active + self.tabs.len() - 1) % self.tabs.len(),
+            Action::Tab1 | Action::Tab2 | Action::Tab3 | Action::Tab4 | Action::Tab5 | Action::Tab6 | Action::Tab7 | Action::Tab8 | Action::Tab9 | Action::TabLast => {
+                let n = a.tab_index().unwrap_or(0).min(self.tabs.len() - 1);
+                if a != Action::TabLast && a.tab_index() != Some(n) { self.msg = format!("only {} tab{}", self.tabs.len(), if self.tabs.len() == 1 { "" } else { "s" }); } else { self.active = n; }
+            }
             Action::Quit => {
                 // the session keeps unsaved work, so quitting never loses anything - say so instead of nagging
                 self.quit = true;
@@ -582,6 +601,7 @@ impl App {
     pub fn hint_ctx(&mut self) -> crate::keys::Ctx {
         use crate::keys::Ctx;
         if self.menu.is_some() { return Ctx::Menu; }
+        if self.rebind.is_some() { return Ctx::Capture; }
         if let Some(p) = &self.picker { return Ctx::Picker { keys: p.kind == PickerKind::Keys }; }
         if let Some(p) = &self.prompt { return if p.kind == PromptKind::Find { Ctx::Find } else { Ctx::Prompt }; }
         let b = self.buf();
@@ -590,6 +610,7 @@ impl App {
 
     fn on_key_inner(&mut self, k: KeyEvent) {
         self.confirm_quit = false;
+        if self.rebind.is_some() { return self.capture_key(k); }
         if self.picker.is_some() { return self.picker_key(k); }
         if self.prompt.is_some() { return self.prompt_key(k); }
         if let Some(m) = self.menu { return self.menu_key(k, m); }
@@ -662,6 +683,7 @@ impl App {
     }
 
     fn picker_key(&mut self, k: KeyEvent) {
+        if self.picker.as_ref().is_some_and(|p| p.kind == PickerKind::Keys) && self.keys_panel_key(&k) { return; }
         let Some(pk) = self.picker.as_mut() else { return };
         let n = pk.shown().len();
         match k.code {
@@ -763,6 +785,66 @@ impl App {
         false
     }
 
+    /// the F1 panel: Enter rebinds the selected action, Insert adds a key, Delete unbinds, Ctrl-R resets. Typing filters as in
+    /// every picker. Returns true when the key was a panel command.
+    fn keys_panel_key(&mut self, k: &KeyEvent) -> bool {
+        let Some(pk) = self.picker.as_ref() else { return false };
+        let ctrl_r = k.modifiers.contains(KeyModifiers::CONTROL) && k.code == KeyCode::Char('r');
+        if !matches!(k.code, KeyCode::Enter | KeyCode::Insert | KeyCode::Delete) && !ctrl_r { return false; }
+        let rows = crate::keys::overview(&self.keymap);
+        let Some(act) = pk.shown().get(pk.sel).and_then(|&i| rows.get(i)).and_then(|r| r.1) else { return true };   // a group heading
+        match k.code {
+            KeyCode::Enter => self.rebind = Some(Rebind { act, add: false, pending: None }),
+            KeyCode::Insert => self.rebind = Some(Rebind { act, add: true, pending: None }),
+            KeyCode::Delete => { crate::keys::unbind(&mut self.keymap, act); self.keys_changed(act, format!("{}: no key", crate::keys::desc(act))); }
+            _ => {
+                let kept = crate::keys::reset(&mut self.keymap, act);
+                let note = if kept > 0 { format!(", {kept} default key{} used elsewhere", if kept == 1 { " is" } else { "s are" }) } else { String::new() };
+                self.keys_changed(act, format!("{}: back to the default{note}", crate::keys::desc(act)));
+            }
+        }
+        true
+    }
+
+    /// a key press while the panel waits for the new key of an action
+    fn capture_key(&mut self, k: KeyEvent) {
+        let Some(mut rb) = self.rebind.take() else { return };
+        if k.code == KeyCode::Esc && k.modifiers.is_empty() { return; }
+        let spec = key_spec(&k);
+        // a bare letter (or Shift-letter) would stop that letter from being typed
+        if matches!(k.code, KeyCode::Char(_)) && !k.modifiers.intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) {
+            self.msg = "a letter alone would stop it being typed: use Ctrl or Alt".into();
+            self.rebind = Some(rb);
+            return;
+        }
+        if let Some(&owner) = self.keymap.get(&spec).filter(|o| **o != rb.act) {
+            if rb.pending.as_deref() != Some(spec.as_str()) {
+                self.msg = format!("{} is \"{}\": press it again to take it", crate::keys::label(&spec), crate::keys::desc(owner));
+                rb.pending = Some(spec);
+                self.rebind = Some(rb);
+                return;
+            }
+        }
+        let taken = crate::keys::rebind(&mut self.keymap, rb.act, &spec, rb.add);
+        let from = taken.map(|o| format!(" (taken from \"{}\")", crate::keys::desc(o))).unwrap_or_default();
+        self.keys_changed(rb.act, format!("{}: {}{from}", crate::keys::desc(rb.act), crate::keys::keys_of(&self.keymap, rb.act).iter().map(|k| crate::keys::label(k)).collect::<Vec<_>>().join(" / ")));
+    }
+
+    /// after any change of the keymap: write keys.lua, rebuild the panel rows (same filter, same action selected) and say it
+    fn keys_changed(&mut self, act: Action, said: String) {
+        let saved = match &self.keys_file {
+            Some(p) => crate::config::write_keys(p, &crate::keys::keys_lua(&crate::keys::overrides(&self.keymap))).map_err(|e| format!("not saved: {e}")),
+            None => Ok(()),
+        };
+        let rows = crate::keys::overview(&self.keymap);
+        if let Some(pk) = self.picker.as_mut().filter(|p| p.kind == PickerKind::Keys) {
+            pk.items = rows.iter().map(|r| r.0.clone()).collect();
+            let shown = pk.shown();
+            if let Some(n) = shown.iter().position(|&i| rows[i].1 == Some(act)) { pk.sel = n; } else { pk.sel = pk.sel.min(shown.len().saturating_sub(1)); }
+        }
+        self.msg = match saved { Ok(()) => said, Err(e) => format!("{said} ({e})") };
+    }
+
     fn picked(&mut self, kind: PickerKind, item: &str) {
         match kind {
             PickerKind::Word => {
@@ -773,10 +855,7 @@ impl App {
                     if !self.jump_word(&w, true) { self.msg = format!("'{w}' not found"); }
                 } else if let Some(m) = self.dict.define(&w) { self.msg = format!("{w}: {m} (not in this tab)"); } else { self.msg = format!("'{w}' is not in this tab"); }
             }
-            PickerKind::Keys => {
-                // Enter on a row runs that command (movement and typing keys are only listed)
-                if let Some((_, Some(a))) = crate::keys::overview(&self.keymap).into_iter().find(|r| r.0 == item) { if !a.is_typing() { self.run(a); } }
-            }
+            PickerKind::Keys => {}   // the panel handles its own Enter (keys_panel_key)
             PickerKind::Palette => if let Some(a) = PALETTE.iter().find(|p| p.0 == item) { self.run(a.1); },
             PickerKind::Language => if let Some(i) = self.hl.index_of(item) { self.buf().syntax = i; self.hl.invalidate_from(0); },
             PickerKind::DiffTab => {
@@ -1135,5 +1214,145 @@ mod msg_tests {
         a.run(Action::Paste);
         assert_eq!(a.msg, "pasted 2 pieces, one per cursor");
         assert_eq!(a.buf().contents(), "ab\ncd\nab12\ncd34");
+    }
+
+    fn tabs_app(n: usize) -> App {
+        let mut a = app("");
+        for i in 1..n { a.new_tab(); a.buf().insert(&format!("tab {i}")); }
+        a.active = 0;
+        a
+    }
+
+    #[test]
+    fn tab_keys_move_between_tabs() {
+        let mut a = tabs_app(4);
+        key(&mut a, KeyCode::Char('.'), KeyModifiers::ALT);
+        assert_eq!(a.active, 1);
+        key(&mut a, KeyCode::PageDown, KeyModifiers::CONTROL);
+        assert_eq!(a.active, 2);
+        key(&mut a, KeyCode::Char(','), KeyModifiers::ALT);
+        key(&mut a, KeyCode::PageUp, KeyModifiers::CONTROL);
+        assert_eq!(a.active, 0);
+        key(&mut a, KeyCode::PageUp, KeyModifiers::CONTROL);
+        assert_eq!(a.active, 3, "previous wraps round");
+        key(&mut a, KeyCode::Char('.'), KeyModifiers::ALT);
+        assert_eq!(a.active, 0, "next wraps round");
+        key(&mut a, KeyCode::Char('3'), KeyModifiers::ALT);
+        assert_eq!(a.active, 2);
+        key(&mut a, KeyCode::Char('0'), KeyModifiers::ALT);
+        assert_eq!(a.active, 3, "alt-0 is the last tab");
+        key(&mut a, KeyCode::Char('1'), KeyModifiers::ALT);
+        assert_eq!(a.active, 0);
+        key(&mut a, KeyCode::Char('9'), KeyModifiers::ALT);
+        assert_eq!(a.active, 0, "there is no tab 9: stay");
+        assert_eq!(a.msg, "only 4 tabs");
+        // typing a digit without Alt still types it
+        key(&mut a, KeyCode::Char('5'), KeyModifiers::NONE);
+        assert!(a.buf().contents().starts_with('5'));
+    }
+
+    fn keys_file_in(a: &mut App, name: &str) -> PathBuf {
+        let p = std::env::temp_dir().join(format!("frost-keys-{}-{name}", std::process::id())).join("keys.lua");
+        let _ = std::fs::remove_dir_all(p.parent().unwrap());
+        a.keys_file = Some(p.clone());
+        p
+    }
+
+    /// move the panel selection to the row of `act`
+    fn select_row(a: &mut App, act: Action) {
+        let rows = crate::keys::overview(&a.keymap);
+        let pk = a.picker.as_mut().unwrap();
+        let shown = pk.shown();
+        pk.sel = shown.iter().position(|&i| rows[i].1 == Some(act)).expect("row is shown");
+    }
+
+    #[test]
+    fn the_key_panel_rebinds_saves_and_resolves_conflicts() {
+        let mut a = tabs_app(3);
+        let file = keys_file_in(&mut a, "panel");
+        key(&mut a, KeyCode::F(1), KeyModifiers::NONE);
+        select_row(&mut a, Action::Tab2);
+        // Enter, then the new key: Alt-J replaces Alt-2
+        key(&mut a, KeyCode::Enter, KeyModifiers::NONE);
+        assert!(a.rebind.is_some());
+        key(&mut a, KeyCode::Char('j'), KeyModifiers::ALT);
+        assert!(a.rebind.is_none());
+        assert_eq!(crate::keys::keys_of(&a.keymap, Action::Tab2), vec!["alt-j"]);
+        assert!(!a.keymap.contains_key("alt-2"));
+        let saved = std::fs::read_to_string(&file).unwrap();
+        assert!(saved.contains("frost.keys[\"alt-j\"] = \"tab2\"") && saved.contains("frost.keys[\"alt-2\"] = \"none\""), "{saved}");
+        // the panel row shows it and stays selected
+        let rows = crate::keys::overview(&a.keymap);
+        let pk = a.picker.as_ref().unwrap();
+        assert!(pk.items[pk.shown()[pk.sel]].starts_with("Alt-J "), "{:?}", pk.items[pk.shown()[pk.sel]]);
+        assert_eq!(rows.len(), pk.items.len());
+        // the new key really works, the old one does not
+        key(&mut a, KeyCode::Esc, KeyModifiers::NONE);
+        assert!(a.picker.is_none());
+        key(&mut a, KeyCode::Char('j'), KeyModifiers::ALT);
+        assert_eq!(a.active, 1);
+        key(&mut a, KeyCode::Char('2'), KeyModifiers::ALT);
+        assert_eq!(a.active, 1, "alt-2 is free now");
+        // Insert adds a second key; a key owned by another action asks first, then takes it
+        key(&mut a, KeyCode::F(1), KeyModifiers::NONE);
+        select_row(&mut a, Action::Tab1);
+        key(&mut a, KeyCode::Insert, KeyModifiers::NONE);
+        key(&mut a, KeyCode::Char('j'), KeyModifiers::ALT);          // owned by Tab2
+        assert!(a.rebind.as_ref().is_some_and(|r| r.pending.as_deref() == Some("alt-j")), "waits for a second press");
+        assert!(a.msg.contains("Alt-J") && a.msg.contains("Go to tab 2"), "{}", a.msg);
+        assert_eq!(a.keymap["alt-j"], Action::Tab2, "nothing moved yet");
+        key(&mut a, KeyCode::Char('j'), KeyModifiers::ALT);
+        assert!(a.rebind.is_none());
+        assert_eq!(a.keymap["alt-j"], Action::Tab1);
+        assert_eq!(crate::keys::keys_of(&a.keymap, Action::Tab1), vec!["alt-1", "alt-j"]);
+        assert!(crate::keys::keys_of(&a.keymap, Action::Tab2).is_empty());
+        assert!(a.msg.contains("taken from"), "{}", a.msg);
+        // a different key instead of the second press drops the pending conflict
+        select_row(&mut a, Action::Tab3);
+        key(&mut a, KeyCode::Enter, KeyModifiers::NONE);
+        key(&mut a, KeyCode::Char('j'), KeyModifiers::ALT);
+        key(&mut a, KeyCode::Char('k'), KeyModifiers::ALT);
+        assert_eq!(crate::keys::keys_of(&a.keymap, Action::Tab3), vec!["alt-k"]);
+        assert_eq!(a.keymap["alt-j"], Action::Tab1, "the conflicting key was not taken");
+        // letters alone are refused (they would stop typing), Esc cancels
+        select_row(&mut a, Action::Save);
+        key(&mut a, KeyCode::Enter, KeyModifiers::NONE);
+        key(&mut a, KeyCode::Char('x'), KeyModifiers::NONE);
+        assert!(a.rebind.is_some() && a.msg.contains("Ctrl or Alt"));
+        key(&mut a, KeyCode::Esc, KeyModifiers::NONE);
+        assert!(a.rebind.is_none() && a.picker.is_some() && crate::keys::keys_of(&a.keymap, Action::Save) == vec!["ctrl-s"]);
+        // Delete unbinds, Ctrl-R resets
+        key(&mut a, KeyCode::Delete, KeyModifiers::NONE);
+        assert!(crate::keys::keys_of(&a.keymap, Action::Save).is_empty());
+        let pk = a.picker.as_ref().unwrap();
+        assert!(pk.items[pk.shown()[pk.sel]].starts_with("(none)"));
+        key(&mut a, KeyCode::Char('r'), KeyModifiers::CONTROL);
+        assert_eq!(crate::keys::keys_of(&a.keymap, Action::Save), vec!["ctrl-s"]);
+        // filter text is not swallowed by the panel commands
+        for c in "line".chars() { key(&mut a, KeyCode::Char(c), KeyModifiers::NONE); }
+        assert_eq!(a.picker.as_ref().unwrap().filter, "line");
+        // what is on disk is exactly the difference to the table
+        let mut cfg = crate::config::test_config();
+        crate::config::run_chunks(&["", &std::fs::read_to_string(&file).unwrap()], &mut cfg).unwrap();
+        assert_eq!(crate::keys::build(&cfg.keys), a.keymap);
+        let _ = std::fs::remove_dir_all(file.parent().unwrap());
+    }
+
+    #[test]
+    fn a_heading_row_does_nothing_and_an_unwritable_file_is_reported() {
+        let mut a = tabs_app(2);
+        key(&mut a, KeyCode::F(1), KeyModifiers::NONE);
+        a.picker.as_mut().unwrap().sel = 0;          // "-- File"
+        key(&mut a, KeyCode::Enter, KeyModifiers::NONE);
+        assert!(a.rebind.is_none() && a.picker.is_some());
+        let bad = std::env::temp_dir().join(format!("frost-keys-{}-bad", std::process::id()));
+        std::fs::write(&bad, "a file, not a directory").unwrap();
+        a.keys_file = Some(bad.join("keys.lua"));
+        select_row(&mut a, Action::Tab2);
+        key(&mut a, KeyCode::Enter, KeyModifiers::NONE);
+        key(&mut a, KeyCode::Char('j'), KeyModifiers::ALT);
+        assert!(a.msg.contains("not saved"), "{}", a.msg);
+        assert_eq!(a.keymap["alt-j"], Action::Tab2, "still bound for this run");
+        let _ = std::fs::remove_file(&bad);
     }
 }

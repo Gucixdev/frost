@@ -13,4 +13,7 @@ else
 fi
 echo "== cargo test"
 cargo test --release --quiet
+echo "== key panel in a private tmux"
+./build > /dev/null
+tests/keypanel
 echo "all good"

@@ -33,8 +33,15 @@ find, find next, replace all, go to line
 Ctrl-D, Alt-A, Alt-S, Ctrl-U, Alt-L, Alt-Up, Alt-Down
 next occurrence as a new cursor, all occurrences, skip one, drop the newest cursor, cursor at the end of each selected line, cursor above, cursor below
 .TP
+Alt-., Alt-,, Alt-1 .. Alt-9, Alt-0
+next tab, previous tab, tab number N, last tab (Ctrl-PgDn and Ctrl-PgUp also move)
+.TP
 Ctrl-T, Ctrl-L, Ctrl-P, F2, F1, F10
 reopen closed tab, language, command palette, define word, keys, menu
+.PP
+F1 opens the key panel: every action with its keys.
+Type to filter, Enter then a key rebinds the row, Insert adds a key, Delete unbinds, Ctrl-R restores the default.
+Changes are saved to keys.lua.
 .SH BRACKETS AND INDENTATION
 Opening brackets and quotes get their partner as you type (per language; see docs/brackets.md), a closer typed in front of the same closer steps over it, Enter indents like the file does and opens a pair into three lines.
 Unclosed brackets are underlined in red and reported in the status line.
@@ -44,6 +51,9 @@ Options: frost.auto_pair, frost.pairs[language], frost.strict[language].
 .TP
 ~/.config/frost/init.lua
 configuration in Lua (theme, options, key bindings)
+.TP
+~/.config/frost/keys.lua
+key bindings changed in the F1 panel (read after init.lua)
 .TP
 ~/.config/frost/dictionary.txt
 extra dictionary entries, one per line: word, TAB, meaning

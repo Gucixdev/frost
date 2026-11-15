@@ -1,0 +1,69 @@
+#!/usr/bin/env bash
+# keypanel - drives the real binary in a private tmux (own socket, own HOME/XDG dirs, so neither your terminal, your tmux
+# nor your config is touched): tab keys, the F1 key panel, keys.lua, and a restart that still has the new binding.
+# 0 arguments. ./test runs it after cargo test. Needs tmux; skips with a note when it is missing.
+set -eu
+cd "$(dirname "$(readlink -f "$0")")/.."
+command -v tmux > /dev/null || { echo "keypanel: tmux not found, skipped"; exit 0; }
+BIN=${FROST_BIN:-target/release/frost}
+[ -x "$BIN" ] || { echo "keypanel: $BIN missing (run ./build)" >&2; exit 1; }
+BIN=$PWD/$BIN
+T=$(mktemp -d); S=frost-keypanel-$$
+trap 'tmux -L "$S" kill-server 2>/dev/null || true' EXIT
+mkdir -p "$T/home" "$T/cfg" "$T/state"
+for n in ONE TWO THREE; do echo "text-of-$n" > "$T/$n.txt"; done
+tm() { tmux -L "$S" -f /dev/null "$@"; }
+screen() { sleep 0.4; tm capture-pane -p -t "$S"; }
+ok() { echo "ok   $1"; }
+bad() { echo "FAIL $1"; echo "---- screen"; screen; echo "----"; exit 1; }
+want() { screen | grep -q -- "$2" && ok "$1" || bad "$1 (wanted: $2)"; }
+nowant() { screen | grep -q -- "$2" && bad "$1 (did not want: $2)" || ok "$1"; }
+start() {
+  tm kill-server 2>/dev/null || true
+  tm new-session -d -s "$S" -x 110 -y 32 "env HOME=$T/home XDG_CONFIG_HOME=$T/cfg XDG_STATE_HOME=$T/state TERM=xterm-256color $BIN $T/ONE.txt $T/TWO.txt $T/THREE.txt"
+  sleep 0.6
+}
+
+start
+want "starts on the last opened file" "text-of-THREE"
+tm send-keys -t "$S" M-1;  want "alt-1 goes to tab 1" "text-of-ONE"
+tm send-keys -t "$S" M-.;  want "alt-. is next tab" "text-of-TWO"
+tm send-keys -t "$S" M-.;  want "alt-. again" "text-of-THREE"
+tm send-keys -t "$S" M-,;  want "alt-, is previous tab" "text-of-TWO"
+tm send-keys -t "$S" M-0;  want "alt-0 is the last tab" "text-of-THREE"
+tm send-keys -t "$S" M-2;  want "alt-2 goes to tab 2" "text-of-TWO"
+
+# the panel: F1, filter, Enter, press the new key
+tm send-keys -t "$S" F1
+want "F1 shows the panel" "Enter changes a key"
+want "tab rows are listed" "Go to tab 2"
+tm send-keys -t "$S" "go to tab 2"
+tm send-keys -t "$S" Enter
+want "Enter asks for the key" "press the new key for \"Go to tab 2\""
+tm send-keys -t "$S" M-j
+want "the row shows the new key" "Alt-J"
+nowant "the question is gone" "press the new key"
+# a key somebody else owns: asked first, nothing moves
+tm send-keys -t "$S" Enter
+tm send-keys -t "$S" M-1
+want "conflict is shown" "already means \"Go to tab 1\""
+tm send-keys -t "$S" Escape
+tm send-keys -t "$S" Escape
+tm send-keys -t "$S" M-1;  want "alt-1 still goes to tab 1" "text-of-ONE"
+tm send-keys -t "$S" M-j;  want "the new key alt-j goes to tab 2" "text-of-TWO"
+tm send-keys -t "$S" M-1; tm send-keys -t "$S" M-2;  want "alt-2 no longer does anything" "text-of-ONE"
+grep -q 'frost.keys\["alt-j"\] = "tab2"' "$T/cfg/frost/keys.lua" && ok "keys.lua has the binding" || { cat "$T/cfg/frost/keys.lua"; bad "keys.lua"; }
+grep -q 'frost.keys\["alt-2"\] = "none"' "$T/cfg/frost/keys.lua" && ok "keys.lua has the unbound default" || bad "keys.lua none"
+[ ! -e "$T/home/.config" ] && ok "nothing written outside XDG_CONFIG_HOME" || bad "wrote to HOME/.config"
+
+# restart: the file is read again
+tm send-keys -t "$S" C-q; sleep 0.5
+start
+tm send-keys -t "$S" M-1;  want "after a restart: alt-1" "text-of-ONE"
+tm send-keys -t "$S" M-j;  want "after a restart: alt-j is tab 2" "text-of-TWO"
+tm send-keys -t "$S" M-1; tm send-keys -t "$S" M-2; want "after a restart: alt-2 is free" "text-of-ONE"
+tm send-keys -t "$S" F1; tm send-keys -t "$S" "go to tab 2"; want "the panel shows it after a restart" "Alt-J"
+tm send-keys -t "$S" C-r;  want "Ctrl-R resets the row" "Alt-2"
+tm send-keys -t "$S" Escape
+grep -q 'alt-j' "$T/cfg/frost/keys.lua" && bad "reset left alt-j in keys.lua" || ok "keys.lua is back to defaults"
+echo "keypanel: all good"
