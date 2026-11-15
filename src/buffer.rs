@@ -1,6 +1,7 @@
 //! Text buffer: a rope, several cursors, snapshot undo (a Rope clone is O(1), so a snapshot is cheap).
 use ropey::Rope;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+use std::time::SystemTime;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Cursor {
@@ -78,6 +79,35 @@ pub struct Buffer {
     pub hid: String,
     /// bumped whenever the undo/redo history changes
     pub hist_gen: u64,
+    /// the file's text (LF) as of the last sync with the disk: the common ancestor for the merge
+    base: String,
+    /// (mtime, length) of the file at that sync; None = not tracked (no file, loaded lazily, or too big)
+    disk_sig: Option<(SystemTime, u64)>,
+    /// the path `base`/`disk_sig` belong to (Save As changes `path`)
+    synced_path: Option<PathBuf>,
+    /// a merge left `<<<<<<<` markers in the text: save refuses until they are gone
+    pub conflict: bool,
+}
+
+/// files up to this many bytes follow the disk live (kept in memory a second time as the merge base)
+const SYNC_MAX: u64 = 4 << 20;
+const MARK: &str = "<<<<<<< yours";
+
+fn stat_sig(p: &Path) -> Option<(SystemTime, u64)> {
+    let m = std::fs::metadata(p).ok()?;
+    Some((m.modified().ok()?, m.len()))
+}
+
+/// the file as editor text (CRLF -> LF) together with its signature; None when missing, unreadable or too big
+fn read_synced(p: &Path) -> Option<((SystemTime, u64), String)> {
+    let f = std::fs::File::open(p).ok()?;
+    let m = f.metadata().ok()?;
+    if m.len() > SYNC_MAX { return None; }
+    let sig = (m.modified().ok()?, m.len());
+    let mut bytes = Vec::with_capacity(m.len() as usize);
+    std::io::Read::read_to_end(&mut std::io::Read::take(f, SYNC_MAX + 1), &mut bytes).ok()?;
+    let s = String::from_utf8_lossy(&bytes);
+    Some((sig, if s.contains("\r\n") { s.replace("\r\n", "\n") } else { s.into_owned() }))
 }
 
 fn is_word(c: char) -> bool { c.is_alphanumeric() || c == '_' }
@@ -86,6 +116,7 @@ impl Buffer {
     pub fn new() -> Self {
         let mut b = Buffer { text: Rope::new(), path: None, modified: false, crlf: false, cursors: vec![Cursor::at(0)], syntax: 0, scroll: 0, hscroll: 0,
                  undo: vec![], redo: vec![], last_kind: "", version: 0, first_changed: usize::MAX, loading: None, title: None, hid: String::new(), hist_gen: 0,
+                 base: String::new(), disk_sig: None, synced_path: None, conflict: false,
                  id: { static N: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1); N.fetch_add(1, std::sync::atomic::Ordering::Relaxed) } };
         b.hid = format!("{:x}{:x}", std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_nanos()).unwrap_or(0), b.id);
         b
@@ -97,13 +128,82 @@ impl Buffer {
         b.text = Rope::from_str(&if crlf { s.replace("\r\n", "\n") } else { s.to_string() });
         b.crlf = crlf;
         b.path = path;
+        if let Some((sig, text)) = b.path.as_deref().and_then(read_synced) { b.track(sig, text); }
         b
+    }
+
+    fn track(&mut self, sig: (SystemTime, u64), base: String) {
+        self.disk_sig = Some(sig);
+        self.base = base;
+        self.synced_path = self.path.clone();
+    }
+
+    fn untrack(&mut self) {
+        self.disk_sig = None;
+        self.base = String::new();
+        self.synced_path = None;
+        self.conflict = false;
+    }
+
+    fn tracked(&self) -> bool { self.disk_sig.is_some() && self.synced_path == self.path && self.path.is_some() }
+
+    fn has_conflict_marker(&self) -> bool { self.text.lines().any(|l| l.len_chars() >= MARK.len() && l.slice(..MARK.len()) == MARK) }
+
+    /// Replace the whole text by `new` as one undo step, keeping the carets where they were.
+    fn replace_text(&mut self, new: &str) {
+        let mine = self.text.to_string();
+        let d = delta(&mine, new);
+        if d.del == 0 && d.ins.is_empty() { return; }
+        self.checkpoint("disk");
+        apply(&mut self.text, &d);
+        let (end, ins) = (d.start + d.del, d.ins.chars().count());
+        let map = |p: usize| if p <= d.start { p } else if p >= end { p + ins - d.del } else { d.start };
+        for c in &mut self.cursors { c.head = map(c.head); c.anchor = map(c.anchor); c.want = None; }
+        let line = self.text.char_to_line(d.start.min(self.text.len_chars()));
+        self.touched(line);
+        self.break_undo();
+    }
+
+    /// Follow the file on disk. Called about once a second: one stat when nothing changed. A clean tab reloads, a
+    /// tab with unsaved edits is merged three-way (base = text at the last sync), conflicts get markers.
+    /// Returns a status line when something happened.
+    pub fn sync_disk(&mut self) -> Option<String> {
+        if self.loading.is_some() || !self.tracked() { return None; }
+        let p = self.path.clone()?;
+        let sig = stat_sig(&p)?;
+        if Some(sig) == self.disk_sig { return None; }
+        let (sig, theirs) = read_synced(&p)?;
+        self.disk_sig = Some(sig);
+        if theirs == self.base { return None; }
+        let name = self.name();
+        if !self.modified {
+            self.replace_text(&theirs);
+            self.modified = false;
+            self.base = theirs;
+            return Some(format!("{name} reloaded: changed on disk"));
+        }
+        let mine = self.text.to_string();
+        let (merged, conflicts) = crate::merge::merge3(&self.base, &mine, &theirs);
+        self.replace_text(&merged);
+        self.base = theirs;
+        self.modified = true;
+        self.conflict |= conflicts > 0;
+        Some(if conflicts > 0 { format!("{name} merged with the file on disk with {conflicts} conflicts: search {MARK}") }
+             else { format!("{name} merged with the file on disk") })
     }
 
     pub fn save(&mut self) -> std::io::Result<()> {
         use std::io::Write;
         self.ensure_loaded();
         let p = self.path.clone().ok_or_else(|| std::io::Error::new(std::io::ErrorKind::Other, "no file name"))?;
+        // whatever changed on disk since the last sync is merged in first, so this save cannot overwrite it
+        self.sync_disk();
+        if self.conflict {
+            if self.has_conflict_marker() {
+                return Err(std::io::Error::new(std::io::ErrorKind::Other, format!("merge conflicts with the file on disk: resolve the {MARK} markers, then save")));
+            }
+            self.conflict = false;
+        }
         let tmp = p.with_extension("frost-tmp");
         {
             let mut w = std::io::BufWriter::with_capacity(1 << 20, std::fs::File::create(&tmp)?);
@@ -116,8 +216,13 @@ impl Buffer {
             }
             w.flush()?;
         }
+        let sig = if self.text.len_chars() as u64 <= SYNC_MAX { stat_sig(&tmp) } else { None };
         std::fs::rename(&tmp, &p)?;
         self.modified = false;
+        match sig {
+            Some(sig) => { let t = self.text.to_string(); self.track(sig, t); }
+            None => self.untrack(),
+        }
         Ok(())
     }
 
@@ -881,7 +986,8 @@ impl Buffer {
     /// the rest streams in on all cores. Memory use is about the size of the text, not twice.
     pub fn open_with(path: &std::path::Path, lazy_min: u64, head: usize, sub: usize) -> std::io::Result<Self> {
         let f = std::fs::File::open(path)?;
-        let size = f.metadata()?.len();
+        let meta = f.metadata()?;
+        let size = meta.len();
         let mut b = Buffer::new();
         b.path = Some(path.to_path_buf());
         if size < lazy_min {
@@ -890,6 +996,9 @@ impl Buffer {
             let mut crlf = false;
             push_piece(&mut b.text, &mut crlf, &bytes);
             b.crlf = crlf;
+            if size <= SYNC_MAX {
+                if let Ok(m) = meta.modified() { let t = b.text.to_string(); b.track((m, size), t); }
+            }
             return Ok(b);
         }
         let cut = next_line_start(&f, head as u64, size);
@@ -1047,5 +1156,145 @@ mod big_tests {
         let plain = Buffer::open_with(&p, u64::MAX, 0, 0).unwrap();
         assert_eq!(plain.text.to_string(), b.text.to_string());
         let _ = std::fs::remove_dir_all(&dir);
+    }
+}
+
+#[cfg(test)]
+mod sync_tests {
+    use super::*;
+    use std::time::Duration;
+
+    fn dir(tag: &str) -> PathBuf {
+        let d = std::env::temp_dir().join(format!("frost-sync-{}-{tag}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        d
+    }
+
+    /// an external writer: new content and an mtime that is certainly different from the last one
+    fn write_disk(p: &Path, s: &str, secs: u64) {
+        std::fs::write(p, s).unwrap();
+        let f = std::fs::OpenOptions::new().write(true).open(p).unwrap();
+        f.set_modified(SystemTime::UNIX_EPOCH + Duration::from_secs(1_700_000_000 + secs)).unwrap();
+    }
+
+    const FIVE: &str = "l1\nl2\nl3\nl4\nl5\n";
+
+    #[test]
+    fn disjoint_edit_on_disk_merges_and_undo_returns() {
+        let d = dir("merge");
+        let p = d.join("f.txt");
+        std::fs::write(&p, FIVE).unwrap();
+        let mut b = Buffer::open(&p).unwrap();
+        assert_eq!(b.sync_disk(), None);
+        b.set_cursor_line_col(0, 0);
+        b.insert("X");
+        let before = b.contents();
+        assert_eq!(before, "Xl1\nl2\nl3\nl4\nl5\n");
+        write_disk(&p, "l1\nl2\nl3\nl4\nL5\n", 1);
+        let msg = b.sync_disk().expect("a message");
+        assert!(msg.contains("merged"), "{msg}");
+        assert_eq!(b.contents(), "Xl1\nl2\nl3\nl4\nL5\n");
+        assert!(b.modified && !b.conflict);
+        assert_eq!(b.sync_disk(), None);
+        b.undo();
+        assert_eq!(b.contents(), before);
+        // the caret stayed on its line
+        assert_eq!(b.pos(b.primary().head).0, 0);
+        // saving writes the merged text and tracks the new file
+        b.redo();
+        b.save().unwrap();
+        assert_eq!(std::fs::read_to_string(&p).unwrap(), "Xl1\nl2\nl3\nl4\nL5\n");
+        assert_eq!(b.sync_disk(), None);
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn same_line_edited_twice_is_a_conflict_and_save_refuses() {
+        let d = dir("conflict");
+        let p = d.join("f.txt");
+        std::fs::write(&p, FIVE).unwrap();
+        let mut b = Buffer::open(&p).unwrap();
+        b.set_cursor_line_col(2, 2);
+        b.insert("mine");
+        write_disk(&p, "l1\nl2\nTHEIRS\nl4\nl5\n", 1);
+        let msg = b.sync_disk().expect("a message");
+        assert!(msg.contains("1 conflicts") && msg.contains("<<<<<<<"), "{msg}");
+        assert!(b.conflict && b.modified);
+        assert_eq!(b.contents(), "l1\nl2\n<<<<<<< yours\nl3mine\n=======\nTHEIRS\n>>>>>>> disk\nl4\nl5\n");
+        let err = b.save().unwrap_err().to_string();
+        assert!(err.contains("merge conflicts"), "{err}");
+        assert_eq!(std::fs::read_to_string(&p).unwrap(), "l1\nl2\nTHEIRS\nl4\nl5\n", "disk untouched");
+        // resolve: keep one side, drop the markers
+        let all = b.contents();
+        let resolved = all.replace("<<<<<<< yours\nl3mine\n=======\nTHEIRS\n>>>>>>> disk\n", "resolved\n");
+        b.select_all();
+        b.insert(&resolved);
+        b.save().unwrap();
+        assert!(!b.conflict && !b.modified);
+        assert_eq!(std::fs::read_to_string(&p).unwrap(), "l1\nl2\nresolved\nl4\nl5\n");
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn clean_tab_reloads() {
+        let d = dir("reload");
+        let p = d.join("f.txt");
+        std::fs::write(&p, FIVE).unwrap();
+        let mut b = Buffer::open(&p).unwrap();
+        b.set_cursor_line_col(4, 1);
+        write_disk(&p, "l1\nnew\nl2\nl3\nl4\nl5\n", 1);
+        let msg = b.sync_disk().expect("a message");
+        assert!(msg.contains("reloaded"), "{msg}");
+        assert_eq!(b.contents(), "l1\nnew\nl2\nl3\nl4\nl5\n");
+        assert!(!b.modified);
+        assert_eq!(b.pos(b.primary().head), (5, 1), "caret follows its line");
+        b.undo();
+        assert_eq!(b.contents(), FIVE);
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn a_change_that_equals_the_base_is_ignored_and_crlf_is_kept() {
+        let d = dir("crlf");
+        let p = d.join("f.txt");
+        std::fs::write(&p, "a\r\nb\r\n").unwrap();
+        let mut b = Buffer::open(&p).unwrap();
+        assert!(b.crlf);
+        write_disk(&p, "a\r\nb\r\n", 1); // touched, same text
+        assert_eq!(b.sync_disk(), None);
+        write_disk(&p, "a\r\nB\r\n", 2);
+        assert!(b.sync_disk().is_some());
+        assert_eq!(b.contents(), "a\nB\n");
+        assert!(b.crlf);
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn save_merges_a_change_the_timer_has_not_seen_yet() {
+        let d = dir("save");
+        let p = d.join("f.txt");
+        std::fs::write(&p, FIVE).unwrap();
+        let mut b = Buffer::open(&p).unwrap();
+        b.set_cursor_line_col(0, 0);
+        b.insert("X");
+        write_disk(&p, "l1\nl2\nl3\nl4\nL5\n", 1);
+        b.save().unwrap();
+        assert_eq!(std::fs::read_to_string(&p).unwrap(), "Xl1\nl2\nl3\nl4\nL5\n");
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn untracked_buffers_are_left_alone() {
+        let mut b = Buffer::from_text("x\n", None);
+        assert_eq!(b.sync_disk(), None);
+        let d = dir("lazy");
+        let p = d.join("f.txt");
+        std::fs::write(&p, "a\n".repeat(1000)).unwrap();
+        let mut b = Buffer::open_with(&p, 100, 50, 50).unwrap();
+        assert!(b.loading.is_some());
+        write_disk(&p, "b\n", 1);
+        assert_eq!(b.sync_disk(), None);
+        let _ = std::fs::remove_dir_all(&d);
     }
 }
