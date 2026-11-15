@@ -6,6 +6,7 @@ mod dict;
 mod diff;
 mod highlight;
 mod history_store;
+mod keys;
 mod merge;
 mod session;
 mod ui;

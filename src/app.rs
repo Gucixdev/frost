@@ -14,22 +14,35 @@ pub enum Action {
     New, Open, Save, SaveAs, Close, NextTab, PrevTab, Quit,
     Undo, Redo, Cut, Copy, Paste, SelectAll, DuplicateLine, DeleteLine, Indent, Unindent,
     Find, FindNext, FindPrev, Replace, Goto, NextOccurrence, CursorUp, CursorDown, OneCursor,
-    Language, Define, WordJump, WordNext, WordPrev, DiffDisk, DiffTab, Palette, ReopenClosed, ClosedTabs, SaveSession, LoadSession, ToggleLineNumbers, Help,
+    Language, Define, WordJump, WordNext, WordPrev, DiffDisk, DiffTab, Palette, ReopenClosed, ClosedTabs, SaveSession, LoadSession, ToggleLineNumbers, Help, Menu,
+    // keys that are not menu commands but live in the key table all the same (so they can be rebound and are listed by F1)
+    Enter, Backspace, Delete, DeleteWord,
+    Left, Right, Up, Down, WordLeft, WordRight, Up5, Down5, Home, End, DocStart, DocEnd, PageUp, PageDown,
 }
 
-pub const MENUS: &[(&str, &[(&str, &str, Action)])] = &[
-    ("File", &[("New", "Ctrl-N", Action::New), ("Open...", "Ctrl-O", Action::Open), ("Save", "Ctrl-S", Action::Save), ("Save As...", "Ctrl-Shift-S", Action::SaveAs),
-               ("Close tab", "Ctrl-W", Action::Close), ("Diff with file on disk", "", Action::DiffDisk), ("Diff with another tab...", "", Action::DiffTab), ("Reopen closed tab", "Ctrl-T", Action::ReopenClosed), ("Closed tabs...", "", Action::ClosedTabs), ("Save session as...", "", Action::SaveSession), ("Load session...", "", Action::LoadSession), ("Quit", "Ctrl-Q", Action::Quit)]),
-    ("Edit", &[("Undo", "Ctrl-Z", Action::Undo), ("Redo", "Ctrl-Y", Action::Redo), ("Cut", "Ctrl-X", Action::Cut), ("Copy", "Ctrl-C", Action::Copy), ("Paste", "Ctrl-V", Action::Paste),
-               ("Select all", "Ctrl-A", Action::SelectAll), ("Duplicate line", "Ctrl-Shift-D", Action::DuplicateLine), ("Delete line", "Ctrl-K", Action::DeleteLine),
-               ("Define word", "F2", Action::Define), ("Jump to word...", "F4", Action::WordJump), ("Next occurrence of word", "F5", Action::WordNext), ("Previous occurrence of word", "Shift-F5", Action::WordPrev), ("Indent", "Tab", Action::Indent), ("Unindent", "Shift-Tab", Action::Unindent)]),
-    ("Search", &[("Find...", "Ctrl-F", Action::Find), ("Find next", "F3", Action::FindNext), ("Find previous", "Shift-F3", Action::FindPrev), ("Replace all...", "Ctrl-H", Action::Replace),
-                 ("Go to line...", "Ctrl-G", Action::Goto)]),
-    ("Cursors", &[("Add next occurrence", "Ctrl-D", Action::NextOccurrence), ("Add cursor above", "Alt-Up", Action::CursorUp), ("Add cursor below", "Alt-Down", Action::CursorDown),
-                  ("Single cursor", "Esc", Action::OneCursor)]),
-    ("View", &[("Next tab", "Ctrl-PgDn", Action::NextTab), ("Previous tab", "Ctrl-PgUp", Action::PrevTab), ("Line numbers", "", Action::ToggleLineNumbers), ("Command palette", "Ctrl-P", Action::Palette)]),
-    ("Language", &[("Choose language...", "Ctrl-L", Action::Language)]),
-    ("Help", &[("Keys", "F1", Action::Help)]),
+impl Action {
+    /// moves the carets; with Shift the same key extends the selection
+    pub fn is_motion(self) -> bool {
+        use Action::*;
+        matches!(self, Left | Right | Up | Down | WordLeft | WordRight | Up5 | Down5 | Home | End | DocStart | DocEnd | PageUp | PageDown)
+    }
+    /// keys that edit or move as you type: the F1 list shows them but does not run them
+    pub fn is_typing(self) -> bool { self.is_motion() || matches!(self, Action::Enter | Action::Backspace | Action::Delete | Action::DeleteWord) }
+}
+
+pub const MENUS: &[(&str, &[(&str, Action)])] = &[
+    ("File", &[("New", Action::New), ("Open...", Action::Open), ("Save", Action::Save), ("Save As...", Action::SaveAs),
+               ("Close tab", Action::Close), ("Diff with file on disk", Action::DiffDisk), ("Diff with another tab...", Action::DiffTab), ("Reopen closed tab", Action::ReopenClosed), ("Closed tabs...", Action::ClosedTabs), ("Save session as...", Action::SaveSession), ("Load session...", Action::LoadSession), ("Quit", Action::Quit)]),
+    ("Edit", &[("Undo", Action::Undo), ("Redo", Action::Redo), ("Cut", Action::Cut), ("Copy", Action::Copy), ("Paste", Action::Paste),
+               ("Select all", Action::SelectAll), ("Duplicate line", Action::DuplicateLine), ("Delete line", Action::DeleteLine),
+               ("Define word", Action::Define), ("Jump to word...", Action::WordJump), ("Next occurrence of word", Action::WordNext), ("Previous occurrence of word", Action::WordPrev), ("Indent", Action::Indent), ("Unindent", Action::Unindent)]),
+    ("Search", &[("Find...", Action::Find), ("Find next", Action::FindNext), ("Find previous", Action::FindPrev), ("Replace all...", Action::Replace),
+                 ("Go to line...", Action::Goto)]),
+    ("Cursors", &[("Add next occurrence", Action::NextOccurrence), ("Add cursor above", Action::CursorUp), ("Add cursor below", Action::CursorDown),
+                  ("Single cursor", Action::OneCursor)]),
+    ("View", &[("Next tab", Action::NextTab), ("Previous tab", Action::PrevTab), ("Line numbers", Action::ToggleLineNumbers), ("Command palette", Action::Palette)]),
+    ("Language", &[("Choose language...", Action::Language)]),
+    ("Help", &[("Keys", Action::Help)]),
 ];
 
 const PALETTE: &[(&str, Action)] = &[
@@ -40,17 +53,13 @@ const PALETTE: &[(&str, Action)] = &[
     ("Define word", Action::Define), ("Jump to word", Action::WordJump), ("Next occurrence of word", Action::WordNext), ("Previous occurrence of word", Action::WordPrev), ("Diff with file on disk", Action::DiffDisk), ("Diff with another tab", Action::DiffTab), ("Reopen closed tab", Action::ReopenClosed), ("Closed tabs", Action::ClosedTabs), ("Save session as", Action::SaveSession), ("Load session", Action::LoadSession), ("Toggle line numbers", Action::ToggleLineNumbers), ("Keys", Action::Help),
 ];
 
-pub const HELP: &str = "Ctrl-S save  Ctrl-O open  Ctrl-N new  Ctrl-W close  Ctrl-Q quit | Ctrl-Z/Y undo/redo  Ctrl-X/C/V  Ctrl-A all  Ctrl-K del line | \
-Ctrl-F find  F3/Shift-F3  Ctrl-H replace  Ctrl-G line  F4 jump to word (buffer + dictionary)  F5/Shift-F5 next/prev occurrence  F2 define | Ctrl-D next occurrence  Alt-Up/Down more cursors  Alt-click add cursor  Esc one cursor | \
-Ctrl-PgUp/PgDn tabs  Ctrl-L language  Ctrl-P palette  mouse: click, drag, double-click word, triple-click line, wheel";
-
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum PromptKind { Open, SaveAs, Find, Goto, ReplaceFind, ReplaceWith, SaveSession }
 
 pub struct Prompt { pub kind: PromptKind, pub label: String, pub input: String, pub aux: String }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub enum PickerKind { Palette, Language, Sessions, Closed, DiffTab, Word }
+pub enum PickerKind { Palette, Language, Sessions, Closed, DiffTab, Word, Keys }
 
 pub struct Picker { pub kind: PickerKind, pub filter: String, pub items: Vec<String>, pub sel: usize }
 
@@ -89,7 +98,6 @@ pub struct App {
     pub quit: bool,
     pub line_numbers: bool,
     pub layout: Layout,
-    pub show_help: bool,
     pub last_find: String,
     clip: String,
     /// talk to wl-copy / xclip / ...: off in tests so they never touch the real clipboard
@@ -105,6 +113,7 @@ pub struct App {
     pub hl_key: (u64, u64),
     pub closed: Vec<TabState>,
     pub hover_row: Option<usize>,
+    /// every bound key: the table in keys.rs with init.lua on top
     pub keymap: std::collections::HashMap<String, Action>,
     pub dict: crate::dict::Dict,
     /// unique words of the active buffer with the lines they occur on, alive only while the word-jump picker is open
@@ -149,8 +158,8 @@ impl App {
     /// an app with one empty tab and no config, session or disk access (also what the tests use)
     pub fn blank() -> App {
         let mut app = App { tabs: vec![], active: 0, hl: Highlighter::new(), prompt: None, picker: None, menu: None, msg: String::new(), quit: false, line_numbers: true,
-                            layout: Layout::default(), show_help: false, last_find: String::new(), clip: String::new(), sys_clip: false, dragging: false, wheel_at: None, wheel_streak: 0, follow_sig: (usize::MAX, 0, 0),
-                            clicks: (Instant::now(), 0, 0, 0), confirm_quit: false, session_dir: PathBuf::new(), hl_key: (0, 0), closed: vec![], hover_row: None, keymap: Default::default(), dict: crate::dict::Dict::empty(), word_idx: Vec::new(), last_word: String::new(), persist: false, hist_written: Default::default(), disk_check: Instant::now(), msg_t: Instant::now() };
+                            layout: Layout::default(), last_find: String::new(), clip: String::new(), sys_clip: false, dragging: false, wheel_at: None, wheel_streak: 0, follow_sig: (usize::MAX, 0, 0),
+                            clicks: (Instant::now(), 0, 0, 0), confirm_quit: false, session_dir: PathBuf::new(), hl_key: (0, 0), closed: vec![], hover_row: None, keymap: crate::keys::build(&Default::default()), dict: crate::dict::Dict::empty(), word_idx: Vec::new(), last_word: String::new(), persist: false, hist_written: Default::default(), disk_check: Instant::now(), msg_t: Instant::now() };
         app.new_tab();
         app
     }
@@ -163,7 +172,7 @@ impl App {
         app.session_dir = session::session_dir();
         app.dict = crate::dict::Dict::load(None);
         app.line_numbers = cfg.line_numbers;
-        app.keymap = cfg.keys.iter().filter_map(|(k, v)| action_by_name(v).map(|a| (k.clone(), a))).collect();
+        app.keymap = crate::keys::build(&cfg.keys);
         if cfg.dictionary.is_some() { app.dict = crate::dict::Dict::load(cfg.dictionary.clone()); }
         if let Some(e) = cfg.error { app.msg = e; }
         // Notepad++ model: the session is ALWAYS kept. Whatever is open (saved files, unsaved edits, untitled tabs) comes back on the
@@ -319,9 +328,32 @@ impl App {
     }
 
     // ---------------------------------------------------------------- actions
-    pub fn run(&mut self, a: Action) {
+    pub fn run(&mut self, a: Action) { self.run_sel(a, false) }
+
+    /// `select`: Shift was held, motions extend the selection
+    pub fn run_sel(&mut self, a: Action, select: bool) {
         self.menu = None;
+        let page = self.layout.text.height.max(2) as usize - 1;
         match a {
+            Action::Enter => self.buf().newline(),
+            Action::Backspace => self.buf().backspace(),
+            Action::Delete => self.buf().delete(),
+            Action::DeleteWord => self.buf().delete_word_back(),
+            Action::Left => self.buf().move_cursors(Move::Left, select),
+            Action::Right => self.buf().move_cursors(Move::Right, select),
+            Action::Up => self.buf().move_cursors(Move::Up, select),
+            Action::Down => self.buf().move_cursors(Move::Down, select),
+            Action::WordLeft => self.buf().move_cursors(Move::WordLeft, select),
+            Action::WordRight => self.buf().move_cursors(Move::WordRight, select),
+            Action::Up5 => for _ in 0..5 { self.buf().move_cursors(Move::Up, select) },
+            Action::Down5 => for _ in 0..5 { self.buf().move_cursors(Move::Down, select) },
+            Action::Home => self.buf().move_cursors(Move::Home, select),
+            Action::End => self.buf().move_cursors(Move::End, select),
+            Action::DocStart => self.buf().move_cursors(Move::DocStart, select),
+            Action::DocEnd => self.buf().move_cursors(Move::DocEnd, select),
+            Action::PageUp => self.buf().move_cursors(Move::PageUp(page), select),
+            Action::PageDown => self.buf().move_cursors(Move::PageDown(page), select),
+            Action::Menu => self.menu = Some(0),
             Action::New => self.new_tab(),
             Action::Open => self.prompt = Some(Prompt { kind: PromptKind::Open, label: "Open:".into(), input: String::new(), aux: String::new() }),
             Action::Save => self.save_active(),
@@ -423,7 +455,10 @@ impl App {
                 if names.is_empty() { self.msg = "no saved sessions".into(); } else { self.picker = Some(Picker { kind: PickerKind::Sessions, filter: String::new(), items: names, sel: 0 }); }
             }
             Action::ToggleLineNumbers => self.line_numbers = !self.line_numbers,
-            Action::Help => self.show_help = !self.show_help,
+            Action::Help => {
+                let items = crate::keys::overview(&self.keymap).into_iter().map(|r| r.0).collect();
+                self.picker = Some(Picker { kind: PickerKind::Keys, filter: String::new(), items, sel: 1 });
+            }
         }
     }
 
@@ -490,61 +525,34 @@ impl App {
         self.active = self.tabs.len() - 1;
     }
 
+    /// the action a key press is bound to (and whether Shift only extends a motion)
+    fn lookup(&self, k: &KeyEvent) -> Option<(Action, bool)> {
+        let spec = key_spec(k);
+        if let Some(&a) = self.keymap.get(&spec) { return Some((a, false)); }
+        if k.modifiers.contains(KeyModifiers::SHIFT) {
+            if let Some(&a) = self.keymap.get(&spec.replace("shift-", "")) { if a.is_motion() { return Some((a, true)); } }
+        }
+        None
+    }
+
+    /// where the user is, for the hint line
+    pub fn hint_ctx(&mut self) -> crate::keys::Ctx {
+        use crate::keys::Ctx;
+        if self.menu.is_some() { return Ctx::Menu; }
+        if let Some(p) = &self.picker { return Ctx::Picker { keys: p.kind == PickerKind::Keys }; }
+        if let Some(p) = &self.prompt { return if p.kind == PromptKind::Find { Ctx::Find } else { Ctx::Prompt }; }
+        let b = self.buf();
+        Ctx::Edit { cursors: b.cursors.len(), selected: b.cursors.iter().any(|c| c.has_sel()) }
+    }
+
     fn on_key_inner(&mut self, k: KeyEvent) {
         self.confirm_quit = false;
-        if self.picker.is_none() && self.prompt.is_none() && self.menu.is_none() && !self.keymap.is_empty() {
-            if let Some(&a) = self.keymap.get(&key_spec(&k)) { return self.run(a); }
-        }
-        if self.show_help { self.show_help = false; if k.code == KeyCode::Esc { return; } }
         if self.picker.is_some() { return self.picker_key(k); }
         if self.prompt.is_some() { return self.prompt_key(k); }
         if let Some(m) = self.menu { return self.menu_key(k, m); }
-        let ctrl = k.modifiers.contains(KeyModifiers::CONTROL);
-        let alt = k.modifiers.contains(KeyModifiers::ALT);
-        let shift = k.modifiers.contains(KeyModifiers::SHIFT);
-        let page = self.layout.text.height.max(2) as usize - 1;
-        if ctrl {
-            if let KeyCode::Char(c) = k.code {
-                let a = match c.to_ascii_lowercase() {
-                    's' if shift => Some(Action::SaveAs), 's' => Some(Action::Save), 'o' => Some(Action::Open), 'n' => Some(Action::New), 'w' => Some(Action::Close),
-                    'q' => Some(Action::Quit), 'z' if shift => Some(Action::Redo), 'z' => Some(Action::Undo), 'y' => Some(Action::Redo),
-                    'x' => Some(Action::Cut), 'c' => Some(Action::Copy), 'v' => Some(Action::Paste), 'a' => Some(Action::SelectAll),
-                    'f' => Some(Action::Find), 'h' => Some(Action::Replace), 'g' => Some(Action::Goto), 'd' if shift => Some(Action::DuplicateLine),
-                    'd' => Some(Action::NextOccurrence), 't' => Some(Action::ReopenClosed), 'k' => Some(Action::DeleteLine), 'l' => Some(Action::Language), 'p' | 'e' => Some(Action::Palette),
-                    _ => None,
-                };
-                if let Some(a) = a { return self.run(a); }
-            }
-        }
-        match k.code {
-            KeyCode::Char(c) if !ctrl && !alt => self.buf().insert(&c.to_string()),
-            KeyCode::Enter => self.buf().newline(),
-            KeyCode::Backspace => if ctrl { self.buf().delete_word_back() } else { self.buf().backspace() },
-            KeyCode::Delete => self.buf().delete(),
-            KeyCode::Tab => self.run(Action::Indent),
-            KeyCode::BackTab => self.run(Action::Unindent),
-            KeyCode::Esc => { self.buf().collapse(); }
-            KeyCode::Left => self.buf().move_cursors(if ctrl { Move::WordLeft } else { Move::Left }, shift),
-            KeyCode::Right => self.buf().move_cursors(if ctrl { Move::WordRight } else { Move::Right }, shift),
-            KeyCode::Up if ctrl => for _ in 0..5 { self.buf().move_cursors(Move::Up, shift) },
-            KeyCode::Down if ctrl => for _ in 0..5 { self.buf().move_cursors(Move::Down, shift) },
-            KeyCode::Up if alt => self.run(Action::CursorUp),
-            KeyCode::Down if alt => self.run(Action::CursorDown),
-            KeyCode::Up => self.buf().move_cursors(Move::Up, shift),
-            KeyCode::Down => self.buf().move_cursors(Move::Down, shift),
-            KeyCode::Home => self.buf().move_cursors(if ctrl { Move::DocStart } else { Move::Home }, shift),
-            KeyCode::End => self.buf().move_cursors(if ctrl { Move::DocEnd } else { Move::End }, shift),
-            KeyCode::PageUp if ctrl => self.run(Action::PrevTab),
-            KeyCode::PageDown if ctrl => self.run(Action::NextTab),
-            KeyCode::PageUp => self.buf().move_cursors(Move::PageUp(page), shift),
-            KeyCode::PageDown => self.buf().move_cursors(Move::PageDown(page), shift),
-            KeyCode::F(1) => self.run(Action::Help),
-            KeyCode::F(2) => self.run(Action::Define),
-            KeyCode::F(4) => self.run(Action::WordJump),
-            KeyCode::F(5) => self.run(if shift { Action::WordPrev } else { Action::WordNext }),
-            KeyCode::F(3) => self.run(if shift { Action::FindPrev } else { Action::FindNext }),
-            KeyCode::F(10) => self.menu = Some(0),
-            _ => {}
+        if let Some((a, select)) = self.lookup(&k) { return self.run_sel(a, select); }
+        if let KeyCode::Char(c) = k.code {
+            if !k.modifiers.intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) { self.buf().insert(&c.to_string()); }
         }
     }
 
@@ -555,7 +563,7 @@ impl App {
             KeyCode::Right => self.menu = Some((m + 1) % MENUS.len()),
             KeyCode::Char(c) => {
                 // first letter of an item runs it
-                if let Some(it) = MENUS[m].1.iter().find(|i| i.0.to_lowercase().starts_with(c.to_ascii_lowercase())) { self.run(it.2); }
+                if let Some(it) = MENUS[m].1.iter().find(|i| i.0.to_lowercase().starts_with(c.to_ascii_lowercase())) { self.run(it.1); }
             }
             _ => {}
         }
@@ -722,6 +730,10 @@ impl App {
                     if !self.jump_word(&w, true) { self.msg = format!("'{w}' not found"); }
                 } else if let Some(m) = self.dict.define(&w) { self.msg = format!("{w}: {m} (not in this tab)"); } else { self.msg = format!("'{w}' is not in this tab"); }
             }
+            PickerKind::Keys => {
+                // Enter on a row runs that command (movement and typing keys are only listed)
+                if let Some((_, Some(a))) = crate::keys::overview(&self.keymap).into_iter().find(|r| r.0 == item) { if !a.is_typing() { self.run(a); } }
+            }
             PickerKind::Palette => if let Some(a) = PALETTE.iter().find(|p| p.0 == item) { self.run(a.1); },
             PickerKind::Language => if let Some(i) = self.hl.index_of(item) { self.buf().syntax = i; self.hl.invalidate_from(0); },
             PickerKind::DiffTab => {
@@ -779,7 +791,7 @@ impl App {
                 if let Some((r, mi)) = self.layout.dropdown {
                     if Self::hit(r, x, y) {
                         let row = (y - r.y) as usize;
-                        if row >= 1 { if let Some(it) = MENUS[mi].1.get(row - 1) { self.run(it.2); } }
+                        if row >= 1 { if let Some(it) = MENUS[mi].1.get(row - 1) { self.run(it.1); } }
                         return;
                     }
                 }
@@ -904,7 +916,7 @@ pub fn key_spec(k: &KeyEvent) -> String {
 
 /// action names for init.lua: the Debug name in lower case ("save", "reopenclosed", "nextoccurrence")
 pub fn action_by_name(name: &str) -> Option<Action> {
-    let all = MENUS.iter().flat_map(|m| m.1.iter().map(|i| i.2)).chain(PALETTE.iter().map(|p| p.1));
+    let all = MENUS.iter().flat_map(|m| m.1.iter().map(|i| i.1)).chain(PALETTE.iter().map(|p| p.1)).chain(crate::keys::KEYS.iter().map(|r| r.act));
     all.into_iter().find(|a| format!("{a:?}").to_lowercase() == name)
 }
 

@@ -11,6 +11,7 @@ CUA clipboard, mouse, multi-cursor, and Notepad++-style sessions. About 2000 lin
 
 ## What it has
 - **Keys (CUA + micro):** Ctrl-S/O/N/W/Q, Ctrl-Z/Y, Ctrl-X/C/V (system clipboard), Ctrl-A, Ctrl-F (live search) F3/Shift-F3, Ctrl-H replace all, Ctrl-G line, Ctrl-K delete line, Ctrl-Shift-D duplicate, Tab/Shift-Tab indent, Ctrl-P command palette, F1 keys, F10 menu.
+- **Key hints:** the bottom line shows the keys that matter right now (idle, selection, several cursors, search, menus, pickers) and gives way to a short message (`copied 3 lines`, `pasted`, `saved`, `nothing to undo`) that fades. F1 opens the full list: type to filter, Enter runs the command. Dispatch, menus, hints and the list all come from one table (`src/keys.rs`); in init.lua `frost.keys["ctrl-k"] = "none"` unbinds a key.
 - **Mouse:** click, drag, double-click word, triple-click line, wheel, tabs, menus (they open when you point at them, like Fresh), Alt/Ctrl-click adds a cursor.
 - **Multi-cursor:** Ctrl-D selects the word, then the next occurrence each press; Alt-Up/Down adds a cursor above/below; every edit, paste (one clipboard line per cursor) and delete works at all cursors; Esc goes back to one.
 - **Huge files:** a file over 8 MB shows its first screen at once (about 150 ms for 811 MB / 10 M lines on 12 cores) while all cores stream the rest in; the status bar shows `loading NN%`. Memory is about 1.4x the text, not 2x. Search works line by line, saving streams to disk. The first edit waits for the load to finish. Far jumps do not re-parse the highlighting. Not tried above ~2.4 GB.
