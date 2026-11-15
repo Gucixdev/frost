@@ -1,0 +1,10 @@
+#!/usr/bin/env bash
+# build - compile frost (release) with cargo. Incremental: only what changed is compiled; BUILD_FORCE=1 ./build rebuilds everything.
+# No arguments. `run` and `install` call this script (install -rebuild sets BUILD_FORCE=1).
+set -eu
+cd "$(dirname "$(readlink -f "$0")")"
+[ $# -eq 0 ] || { echo "build: takes no arguments (BUILD_FORCE=1 in the environment forces a full rebuild)" >&2; exit 2; }
+command -v cargo > /dev/null || { echo "build: cargo not found (install Rust: https://rustup.rs)" >&2; exit 1; }
+[ -z "${BUILD_FORCE:-}" ] || cargo clean --release --quiet -p frost
+cargo build --release --locked --quiet
+echo "built: target/release/frost"

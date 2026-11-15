@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# run - build frost (release) if needed and start it; no files = reopen the last session. 0 arguments.
+# run - ./build (incremental), then start it; no files = reopen the last session. 0 arguments.
 set -eu
 cd "$(dirname "$(readlink -f "$0")")"
-cargo build --release --quiet
+./build > /dev/null
 exec ./target/release/frost
