@@ -27,7 +27,6 @@ pub fn draw(f: &mut Frame, app: &mut App) {
     text_area(f, app, rows[2], gutter);
     status_bar(f, app, rows[3]);
 
-    suggestions(f, app, area);
     if let Some(mi) = app.menu { dropdown(f, app, mi, rows[0]); }
     if app.picker.is_some() { picker(f, app, area); }
     if app.show_help { help(f, area); }
@@ -232,30 +231,3 @@ fn help(f: &mut Frame, area: Rect) {
     f.render_widget(Paragraph::new(HELP.replace(" | ", "\n\n")).wrap(Wrap { trim: true }), inner);
 }
 
-fn mix(a: Color, b: Color) -> Color {
-    match (a, b) { (Color::Rgb(r1, g1, b1), Color::Rgb(r2, g2, b2)) => Color::Rgb(((r1 as u16 + r2 as u16) / 2) as u8, ((g1 as u16 + g2 as u16) / 2) as u8, ((b1 as u16 + b2 as u16) / 2) as u8), _ => a }
-}
-
-/// the word popup under the caret (TempleOS-style: word and meaning)
-fn suggestions(f: &mut Frame, app: &App, area: Rect) {
-    let (Some((items, sel, _)), Some((cx, cy))) = (app.suggest.as_ref(), app.layout.caret) else { return };
-    if app.menu.is_some() || app.picker.is_some() || app.prompt.is_some() { return; }
-    let t = crate::config::theme();
-    let w = items.iter().map(|(a, b)| a.chars().count() + b.chars().count() + 5).max().unwrap_or(10).clamp(16, 60) as u16;
-    let h = items.len() as u16;
-    let w = w.min(area.width);
-    let x = cx.min(area.x + area.width - w);
-    let y = if cy + 1 + h < area.y + area.height { cy + 1 } else { cy.saturating_sub(h) };
-    let rect = Rect::new(x, y, w, h);
-    f.render_widget(Clear, rect);
-    let lines: Vec<Line> = items.iter().enumerate().map(|(i, (word, meaning))| {
-        let st = if i == *sel { Style::default().bg(t.accent).fg(t.bg) } else { Style::default().bg(t.bar).fg(t.fg) };
-        let dim = if i == *sel { st } else { Style::default().bg(t.bar).fg(t.dim) };
-        let mut s = format!(" {word} ");
-        let m: String = meaning.chars().take((w as usize).saturating_sub(s.chars().count() + 2)).collect();
-        let pad = (w as usize).saturating_sub(s.chars().count() + m.chars().count());
-        if !m.is_empty() { s.push(' '); }
-        Line::from(vec![Span::styled(s, st), Span::styled(m, dim), Span::styled(" ".repeat(pad), st)])
-    }).collect();
-    f.render_widget(Paragraph::new(lines), rect);
-}

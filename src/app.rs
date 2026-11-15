@@ -102,10 +102,6 @@ pub struct App {
     pub hover_row: Option<usize>,
     pub keymap: std::collections::HashMap<String, Action>,
     pub dict: crate::dict::Dict,
-    /// word suggestions under the caret: (word, meaning) list, selected row, chars already typed
-    pub suggest: Option<(Vec<(String, String)>, usize, usize)>,
-    /// word-completion popup while typing: off unless `frost.autocomplete = true` (jump to a word with F4 instead)
-    pub autocomplete: bool,
     /// unique words of the active buffer with the lines they occur on, alive only while the word-jump picker is open
     word_idx: Vec<(String, Vec<usize>)>,
     /// the word last jumped to (F5 / Shift-F5 repeat the jump)
@@ -150,10 +146,9 @@ impl App {
         let hl = Highlighter::new();
         let mut app = App { tabs: vec![], active: 0, hl, prompt: None, picker: None, menu: None, msg: String::new(), quit: false, line_numbers: true,
                             layout: Layout::default(), show_help: false, last_find: String::new(), clip: String::new(), dragging: false, wheel_at: None, wheel_streak: 0, follow_sig: (usize::MAX, 0, 0),
-                            clicks: (Instant::now(), 0, 0, 0), confirm_quit: false, session_dir: session::session_dir(), hl_key: (0, 0), closed: vec![], hover_row: None, keymap: Default::default(), dict: crate::dict::Dict::load(None), suggest: None, autocomplete: false, word_idx: Vec::new(), last_word: String::new(), persist: true, hist_written: Default::default() };
+                            clicks: (Instant::now(), 0, 0, 0), confirm_quit: false, session_dir: session::session_dir(), hl_key: (0, 0), closed: vec![], hover_row: None, keymap: Default::default(), dict: crate::dict::Dict::load(None), word_idx: Vec::new(), last_word: String::new(), persist: true, hist_written: Default::default() };
         app.line_numbers = cfg.line_numbers;
         app.keymap = cfg.keys.iter().filter_map(|(k, v)| action_by_name(v).map(|a| (k.clone(), a))).collect();
-        app.autocomplete = cfg.autocomplete;
         if cfg.dictionary.is_some() { app.dict = crate::dict::Dict::load(cfg.dictionary.clone()); }
         if let Some(e) = cfg.error { app.msg = e; }
         // Notepad++ model: the session is ALWAYS kept. Whatever is open (saved files, unsaved edits, untitled tabs) comes back on the
@@ -427,20 +422,8 @@ impl App {
 
     // ---------------------------------------------------------------- keyboard
     pub fn on_key(&mut self, k: KeyEvent) {
-        if self.suggest.is_some() && self.picker.is_none() && self.prompt.is_none() && self.menu.is_none() {
-            let n = self.suggest.as_ref().map(|s| s.0.len()).unwrap_or(0);
-            match k.code {
-                KeyCode::Tab if k.modifiers.is_empty() => { self.accept_suggestion(); return; }
-                KeyCode::Down => { if let Some(s) = self.suggest.as_mut() { s.1 = (s.1 + 1) % n; } return; }
-                KeyCode::Up => { if let Some(s) = self.suggest.as_mut() { s.1 = (s.1 + n - 1) % n; } return; }
-                KeyCode::Esc => { self.suggest = None; return; }
-                _ => {}
-            }
-        }
-        let typing = matches!(k.code, KeyCode::Char(_) | KeyCode::Backspace) && !k.modifiers.intersects(KeyModifiers::CONTROL | KeyModifiers::ALT);
         self.on_key_inner(k);
         if self.picker.is_none() && !self.word_idx.is_empty() { self.word_idx = Vec::new(); }
-        if typing { self.update_suggest(); } else { self.suggest = None; }
     }
 
     fn show_diff(&mut self, title: String, an: &str, at: &str, bn: &str, bt: &str) {
@@ -451,22 +434,6 @@ impl App {
         b.syntax = self.hl.index_of("Diff").unwrap_or(0);
         self.tabs.push(b);
         self.active = self.tabs.len() - 1;
-    }
-
-    fn update_suggest(&mut self) {
-        self.suggest = None;
-        if !self.autocomplete || self.picker.is_some() || self.prompt.is_some() || self.tabs.is_empty() { return; }
-        let b = &self.tabs[self.active.min(self.tabs.len() - 1)];
-        if b.cursors.len() != 1 || b.cursors[0].has_sel() { return; }
-        let (w, start) = b.word_at_caret();
-        let typed = b.cursors[0].head - start;
-        if typed < 2 || typed != w.chars().count() { return; }   // only while the caret is at the end of the word
-        let items = self.dict.complete(&w, &b.nearby_words(300), 8);
-        if !items.is_empty() { self.suggest = Some((items, 0, typed)); }
-    }
-
-    fn accept_suggestion(&mut self) {
-        if let Some((items, sel, n)) = self.suggest.take() { self.buf().replace_before_caret(n, &items[sel].0); }
     }
 
     fn on_key_inner(&mut self, k: KeyEvent) {
