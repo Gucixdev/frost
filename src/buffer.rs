@@ -1,6 +1,8 @@
 //! Text buffer: a rope, several cursors, snapshot undo (a Rope clone is O(1), so a snapshot is cheap).
 use ropey::Rope;
 use std::path::{Path, PathBuf};
+
+mod multi;
 use std::time::SystemTime;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -49,6 +51,10 @@ const HIST_MAX_CHARS: usize = 4 << 20;
 const KEEP: usize = 3000;
 /// uncompressed budget for one tab's saved steps
 const HIST_MAX_BYTES: usize = 32 << 20;
+
+/// one cursor's share of an edit: replace chars `start..end` by `text`; `head` and `anchor` are where the cursor ends,
+/// counted in chars from `start` of the new text
+pub struct Edit { pub start: usize, pub end: usize, pub text: String, pub head: usize, pub anchor: usize }
 
 /// what a copy or cut took, for the status message
 pub enum CopyKind { Lines, Selections(usize) }
@@ -374,25 +380,47 @@ impl Buffer {
     // ---------------------------------------------------------------- editing at every cursor
     /// Replace every cursor's selection with f(selected text) -> (new text). Cursors end after the new text.
     fn edit_each(&mut self, kind: &'static str, f: &dyn Fn(&str) -> String) {
+        self.edit_with(kind, &|_, text, c| {
+            let new = f(&text.slice(c.start()..c.end()).to_string());
+            let n = new.chars().count();
+            Edit { start: c.start(), end: c.end(), text: new, head: n, anchor: n }
+        });
+    }
+
+    /// The general edit: `f` looks at the untouched text and one cursor and says what to replace and where that cursor ends up.
+    /// All cursors are edited as one undo step; edits go back to front so earlier positions stay valid, cursors that end up on the
+    /// same spot are merged.
+    pub(crate) fn edit_with(&mut self, kind: &'static str, f: &dyn Fn(usize, &Rope, &Cursor) -> Edit) {
         self.checkpoint(kind);
         self.normalize();
-        let mut cs = self.cursors.clone();
-        let mut first = usize::MAX;
-        for i in (0..cs.len()).rev() {
-            let (s, e) = (cs[i].start(), cs[i].end());
-            let new = f(&self.text.slice(s..e).to_string());
-            first = first.min(self.text.char_to_line(s));
-            self.text.remove(s..e);
-            self.text.insert(s, &new);
-            let n = new.chars().count();
-            let delta = n as isize - (e - s) as isize;
-            cs[i] = Cursor::at(s + n);
-            for c in cs.iter_mut().skip(i + 1) {
-                c.head = (c.head as isize + delta) as usize;
-                c.anchor = (c.anchor as isize + delta) as usize;
-            }
+        // normalize leaves the primary cursor last; edit in text order and put the primary back last afterwards
+        let primary = self.cursors.pop().unwrap();
+        let mut sorted = std::mem::take(&mut self.cursors);
+        let at = sorted.partition_point(|c| (c.start(), c.end()) < (primary.start(), primary.end()));
+        sorted.insert(at, primary);
+        let mut edits: Vec<Edit> = sorted.iter().enumerate().map(|(i, c)| f(i, &self.text, c)).collect();
+        // an edit may reach outside its cursor (a pair delete, a re-indent); never into the edit after it
+        let mut limit = usize::MAX;
+        for e in edits.iter_mut().rev() {
+            e.end = e.end.min(limit);
+            e.start = e.start.min(e.end);
+            limit = e.start;
         }
-        self.cursors = cs;
+        let mut first = usize::MAX;
+        for e in edits.iter().rev() {
+            first = first.min(self.text.char_to_line(e.start));
+            self.text.remove(e.start..e.end);
+            self.text.insert(e.start, &e.text);
+        }
+        let mut shift = 0isize;
+        for (c, e) in sorted.iter_mut().zip(&edits) {
+            let pos = (e.start as isize + shift) as usize;
+            *c = Cursor { head: pos + e.head, anchor: pos + e.anchor, want: None };
+            shift += e.text.chars().count() as isize - (e.end - e.start) as isize;
+        }
+        let p = sorted.remove(at);
+        sorted.push(p);
+        self.cursors = sorted;
         self.normalize();
         self.touched(first);
     }
@@ -412,44 +440,29 @@ impl Buffer {
     /// True when the lines were spread one per cursor.
     pub fn paste(&mut self, s: &str) -> bool {
         let parts: Vec<String> = s.lines().map(|l| l.to_string()).collect();
-        if self.cursors.len() > 1 && parts.len() == self.cursors.len() {
-            self.checkpoint("paste");
-            self.normalize();
-            let mut cs = self.cursors.clone();
-            let mut first = usize::MAX;
-            for i in (0..cs.len()).rev() {
-                let (a, b) = (cs[i].start(), cs[i].end());
-                first = first.min(self.text.char_to_line(a));
-                self.text.remove(a..b);
-                self.text.insert(a, &parts[i]);
-                let n = parts[i].chars().count();
-                let delta = n as isize - (b - a) as isize;
-                cs[i] = Cursor::at(a + n);
-                for c in cs.iter_mut().skip(i + 1) { c.head = (c.head as isize + delta) as usize; c.anchor = (c.anchor as isize + delta) as usize; }
-            }
-            self.cursors = cs;
-            self.normalize();
-            self.touched(first);
-            true
-        } else {
-            let s = s.replace("\r\n", "\n");
-            self.edit_each("paste", &move |_| s.clone());
-            false
-        }
+        if self.cursors.len() > 1 && parts.len() == self.cursors.len() { self.paste_parts(&parts); true }
+        else { let s = s.replace("\r\n", "\n"); self.edit_each("paste", &move |_| s.clone()); false }
+    }
+
+    /// one piece of text per cursor, in text order (the primary cursor is not special here)
+    pub fn paste_parts(&mut self, parts: &[String]) {
+        self.edit_with("paste", &|i, _, c| {
+            let t = parts.get(i).cloned().unwrap_or_default();
+            let n = t.chars().count();
+            Edit { start: c.start(), end: c.end(), text: t, head: n, anchor: n }
+        });
     }
 
     pub fn newline(&mut self) {
-        // keep the indentation of the line the cursor is on
-        let ind: Vec<String> = self.cursors.iter().map(|c| {
-            let l = self.text.char_to_line(c.start());
-            self.line_string(l).chars().take_while(|ch| *ch == ' ' || *ch == '\t').collect()
-        }).collect();
-        if self.cursors.len() == 1 {
-            let t = format!("\n{}", ind[0]);
-            self.edit_each("newline", &move |_| t.clone());
-        } else {
-            self.edit_each("newline", &|_| "\n".to_string());
-        }
+        // every cursor keeps the indentation of its own line (as far as the caret is inside it)
+        self.edit_with("newline", &|_, text, c| {
+            let l = text.char_to_line(c.start());
+            let ls = text.line_to_char(l);
+            let ind: String = text.line(l).chars().take(c.start() - ls).take_while(|ch| *ch == ' ' || *ch == '\t').collect();
+            let t = format!("\n{ind}");
+            let n = t.chars().count();
+            Edit { start: c.start(), end: c.end(), text: t, head: n, anchor: n }
+        });
     }
 
     pub fn backspace(&mut self) {
@@ -457,7 +470,12 @@ impl Buffer {
             // turn "delete one char before" into a selection, then replace it with nothing
             for c in self.cursors.iter_mut() { if c.head > 0 { c.anchor = c.head - 1; } }
         }
-        self.edit_each("del", &|_| String::new());
+        self.delete_selected();
+    }
+
+    /// delete what the cursors select; nothing selected anywhere (start of the text, say) is not an edit
+    fn delete_selected(&mut self) {
+        if self.cursors.iter().any(|c| c.has_sel()) { self.edit_each("del", &|_| String::new()); }
     }
 
     pub fn delete(&mut self) {
@@ -465,7 +483,7 @@ impl Buffer {
         if self.cursors.iter().all(|c| !c.has_sel()) {
             for c in self.cursors.iter_mut() { if c.head < n { c.anchor = c.head + 1; } }
         }
-        self.edit_each("del", &|_| String::new());
+        self.delete_selected();
     }
 
     pub fn delete_word_back(&mut self) {
@@ -473,23 +491,21 @@ impl Buffer {
             let targets: Vec<usize> = self.cursors.iter().map(|c| self.word_left(c.head)).collect();
             for (c, t) in self.cursors.iter_mut().zip(targets) { c.anchor = t; }
         }
-        self.edit_each("del", &|_| String::new());
+        self.delete_selected();
     }
 
     pub fn indent(&mut self, back: bool) {
+        if !back && self.cursors.iter().all(|c| !c.has_sel()) {
+            // plain Tab with no selection: insert the indent at each caret
+            self.insert(&" ".repeat(crate::config::tab_width()));
+            return;
+        }
         self.checkpoint("indent");
         self.normalize();
         let mut lines: Vec<usize> = vec![];
         for c in &self.cursors {
             let (a, b) = (self.text.char_to_line(c.start()), self.text.char_to_line(c.end()));
             for l in a..=b { if !lines.contains(&l) { lines.push(l); } }
-        }
-        if !back && self.cursors.iter().all(|c| !c.has_sel()) {
-            // plain Tab with no selection: just insert 4 spaces at each caret
-            self.last_kind = "";
-            self.undo.pop();
-            self.insert(&" ".repeat(crate::config::tab_width()));
-            return;
         }
         lines.sort();
         let first = lines.first().copied().unwrap_or(0);
@@ -544,8 +560,11 @@ impl Buffer {
         self.checkpoint("line");
         self.normalize();
         let mut first = usize::MAX;
-        let mut ls: Vec<(usize, usize)> = self.cursors.iter().map(|c| (self.text.char_to_line(c.start()), self.text.char_to_line(c.end()))).collect();
-        ls.dedup();
+        let mut ls: Vec<(usize, usize)> = self.cursors.iter().map(|c| (self.text.char_to_line(c.start()), self.text.char_to_line(c.end()))).collect();   // sorted: normalize() ran
+        // cursors on the same line, or selections that overlap, copy those lines once
+        let mut merged: Vec<(usize, usize)> = vec![];
+        for (a, b) in ls.drain(..) { match merged.last_mut() { Some(r) if a <= r.1 => r.1 = r.1.max(b), _ => merged.push((a, b)) } }
+        let ls = merged;
         for (a, b) in ls.into_iter().rev() {
             let s = self.text.line_to_char(a);
             let e = if b + 1 < self.lines() { self.text.line_to_char(b + 1) } else { self.len() };
@@ -656,7 +675,13 @@ impl Buffer {
     pub fn collapse(&mut self) { let p = self.primary(); self.cursors = vec![Cursor::at(p.head)]; }
     pub fn click(&mut self, p: usize, extend: bool, add: bool) {
         self.break_undo();
-        if add { self.cursors.push(Cursor::at(p)); }
+        if add {
+            // Alt-click on a cursor takes it away again (never the last one)
+            match self.cursors.iter().position(|c| c.start() <= p && p <= c.end()) {
+                Some(i) if self.cursors.len() > 1 => { self.cursors.remove(i); }
+                _ => self.cursors.push(Cursor::at(p)),
+            }
+        }
         else if extend { let a = self.primary().anchor; self.cursors = vec![Cursor { head: p, anchor: a, want: None }]; }
         else { self.cursors = vec![Cursor::at(p)]; }
         self.normalize();
@@ -669,31 +694,6 @@ impl Buffer {
         let s = self.idx(line, 0);
         let e = if line + 1 < self.lines() { self.text.line_to_char(line + 1) } else { self.len() };
         self.cursors = vec![Cursor { head: e, anchor: s, want: None }];
-    }
-
-    /// Ctrl-D: with no selection select the word under the caret, else add a cursor on the next occurrence of the selected text.
-    pub fn add_next_occurrence(&mut self) -> bool {
-        let last = self.primary();
-        if !last.has_sel() {
-            let (a, b) = self.word_at(last.head);
-            if a == b { return false; }
-            *self.cursors.last_mut().unwrap() = Cursor { head: b, anchor: a, want: None };
-            return true;
-        }
-        let needle: Vec<char> = self.text.slice(last.start()..last.end()).chars().collect();
-        let total = self.len();
-        let hay: Vec<char> = self.text.chars().collect();
-        let n = needle.len();
-        let mut p = last.end();
-        for _ in 0..total.max(1) {
-            if p + n > total { p = 0; }
-            if hay[p..p + n] == needle[..] && !self.cursors.iter().any(|c| c.start() == p && c.end() == p + n) {
-                self.cursors.push(Cursor { head: p + n, anchor: p, want: None });
-                return true;
-            }
-            p += 1;
-        }
-        false
     }
 
     /// Alt-Up / Alt-Down: a new cursor on the line above or below the primary one, in the same column.

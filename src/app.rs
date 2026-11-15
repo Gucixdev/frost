@@ -13,7 +13,7 @@ use std::time::{Duration, Instant};
 pub enum Action {
     New, Open, Save, SaveAs, Close, NextTab, PrevTab, Quit,
     Undo, Redo, Cut, Copy, Paste, SelectAll, DuplicateLine, DeleteLine, Indent, Unindent,
-    Find, FindNext, FindPrev, Replace, Goto, NextOccurrence, CursorUp, CursorDown, OneCursor,
+    Find, FindNext, FindPrev, Replace, Goto, NextOccurrence, SelectOccurrences, SkipOccurrence, UndoCursor, SplitLines, CursorUp, CursorDown, OneCursor,
     Language, Define, WordJump, WordNext, WordPrev, DiffDisk, DiffTab, Palette, ReopenClosed, ClosedTabs, SaveSession, LoadSession, ToggleLineNumbers, Help, Menu,
     // keys that are not menu commands but live in the key table all the same (so they can be rebound and are listed by F1)
     Enter, Backspace, Delete, DeleteWord,
@@ -38,8 +38,9 @@ pub const MENUS: &[(&str, &[(&str, Action)])] = &[
                ("Define word", Action::Define), ("Jump to word...", Action::WordJump), ("Next occurrence of word", Action::WordNext), ("Previous occurrence of word", Action::WordPrev), ("Indent", Action::Indent), ("Unindent", Action::Unindent)]),
     ("Search", &[("Find...", Action::Find), ("Find next", Action::FindNext), ("Find previous", Action::FindPrev), ("Replace all...", Action::Replace),
                  ("Go to line...", Action::Goto)]),
-    ("Cursors", &[("Add next occurrence", Action::NextOccurrence), ("Add cursor above", Action::CursorUp), ("Add cursor below", Action::CursorDown),
-                  ("Single cursor", Action::OneCursor)]),
+    ("Cursors", &[("Add next occurrence", Action::NextOccurrence), ("Select all occurrences", Action::SelectOccurrences), ("Skip this occurrence", Action::SkipOccurrence),
+                  ("Add cursor above", Action::CursorUp), ("Add cursor below", Action::CursorDown), ("Cursor at the end of each selected line", Action::SplitLines),
+                  ("Undo last cursor", Action::UndoCursor), ("Single cursor", Action::OneCursor)]),
     ("View", &[("Next tab", Action::NextTab), ("Previous tab", Action::PrevTab), ("Line numbers", Action::ToggleLineNumbers), ("Command palette", Action::Palette)]),
     ("Language", &[("Choose language...", Action::Language)]),
     ("Help", &[("Keys", Action::Help)]),
@@ -49,6 +50,7 @@ const PALETTE: &[(&str, Action)] = &[
     ("New file", Action::New), ("Open file", Action::Open), ("Save", Action::Save), ("Save as", Action::SaveAs), ("Close tab", Action::Close), ("Quit", Action::Quit),
     ("Undo", Action::Undo), ("Redo", Action::Redo), ("Select all", Action::SelectAll), ("Duplicate line", Action::DuplicateLine), ("Delete line", Action::DeleteLine),
     ("Find", Action::Find), ("Replace all", Action::Replace), ("Go to line", Action::Goto), ("Add next occurrence (multi-cursor)", Action::NextOccurrence),
+    ("Select all occurrences", Action::SelectOccurrences), ("Skip this occurrence", Action::SkipOccurrence), ("Undo last cursor", Action::UndoCursor), ("Cursor at the end of each selected line", Action::SplitLines),
     ("Add cursor above", Action::CursorUp), ("Add cursor below", Action::CursorDown), ("Single cursor", Action::OneCursor), ("Choose language", Action::Language),
     ("Define word", Action::Define), ("Jump to word", Action::WordJump), ("Next occurrence of word", Action::WordNext), ("Previous occurrence of word", Action::WordPrev), ("Diff with file on disk", Action::DiffDisk), ("Diff with another tab", Action::DiffTab), ("Reopen closed tab", Action::ReopenClosed), ("Closed tabs", Action::ClosedTabs), ("Save session as", Action::SaveSession), ("Load session", Action::LoadSession), ("Toggle line numbers", Action::ToggleLineNumbers), ("Keys", Action::Help),
 ];
@@ -100,6 +102,8 @@ pub struct App {
     pub layout: Layout,
     pub last_find: String,
     clip: String,
+    /// what each cursor copied, so pasting the same text back at as many cursors gives everyone their own piece
+    clip_parts: Vec<String>,
     /// talk to wl-copy / xclip / ...: off in tests so they never touch the real clipboard
     sys_clip: bool,
     dragging: bool,
@@ -159,7 +163,7 @@ impl App {
     pub fn blank() -> App {
         let mut app = App { tabs: vec![], active: 0, hl: Highlighter::new(), prompt: None, picker: None, menu: None, msg: String::new(), quit: false, line_numbers: true,
                             layout: Layout::default(), last_find: String::new(), clip: String::new(), sys_clip: false, dragging: false, wheel_at: None, wheel_streak: 0, follow_sig: (usize::MAX, 0, 0),
-                            clicks: (Instant::now(), 0, 0, 0), confirm_quit: false, session_dir: PathBuf::new(), hl_key: (0, 0), closed: vec![], hover_row: None, keymap: crate::keys::build(&Default::default()), dict: crate::dict::Dict::empty(), word_idx: Vec::new(), last_word: String::new(), persist: false, hist_written: Default::default(), disk_check: Instant::now(), msg_t: Instant::now() };
+                            clicks: (Instant::now(), 0, 0, 0), confirm_quit: false, session_dir: PathBuf::new(), hl_key: (0, 0), closed: vec![], hover_row: None, clip_parts: vec![], keymap: crate::keys::build(&Default::default()), dict: crate::dict::Dict::empty(), word_idx: Vec::new(), last_word: String::new(), persist: false, hist_written: Default::default(), disk_check: Instant::now(), msg_t: Instant::now() };
         app.new_tab();
         app
     }
@@ -261,7 +265,7 @@ impl App {
         let b = &self.tabs[i];
         if b.path.is_none() && b.len() == 0 { return; }
         let st = Self::tab_state(&self.hl, b);
-        if b.len() <= 4 << 20 { if let Some(h) = b.history() { let _ = crate::history_store::save(&self.session_dir, &b.hid, &h); } }
+        if self.persist && b.len() <= 4 << 20 { if let Some(h) = b.history() { let _ = crate::history_store::save(&self.session_dir, &b.hid, &h); } }
         self.closed.retain(|c| !(c.path.is_some() && c.path == st.path));
         self.closed.push(st);
         if self.closed.len() > 30 { self.closed.remove(0); }
@@ -418,12 +422,15 @@ impl App {
             Action::Redo => self.msg = if self.buf().redo() { "redone".into() } else { "nothing to redo".into() },
             Action::Cut => {
                 let what = self.buf().copy_kind();
+                let parts = self.buf().selection_parts();
                 let t = self.buf().cut();
+                self.clip_parts = parts;
                 self.msg = format!("cut {}", what.describe(&t));
                 self.copy_text(t);
             }
             Action::Copy => {
                 let what = self.buf().copy_kind();
+                self.clip_parts = self.buf().selection_parts();
                 let t = self.buf().selected_text();
                 self.msg = format!("copied {}", what.describe(&t));
                 self.copy_text(t);
@@ -443,10 +450,29 @@ impl App {
             Action::FindPrev => self.find_step(false),
             Action::Replace => self.prompt = Some(Prompt { kind: PromptKind::ReplaceFind, label: "Replace all - find:".into(), input: self.last_find.clone(), aux: String::new() }),
             Action::Goto => self.prompt = Some(Prompt { kind: PromptKind::Goto, label: "Go to line:".into(), input: String::new(), aux: String::new() }),
-            Action::NextOccurrence => { if !self.buf().add_next_occurrence() { self.msg = "no more occurrences".into(); } }
+            Action::NextOccurrence => {
+                let added = self.buf().add_next_occurrence();   // the status bar counts the cursors
+                if !added { self.msg = "no more occurrences".into(); }
+            }
+            Action::SelectOccurrences => {
+                let n = self.buf().select_all_occurrences();
+                self.msg = if n == 0 { "nothing to select".into() } else { format!("{n} occurrences selected") };
+            }
+            Action::SkipOccurrence => {
+                if !self.buf().skip_occurrence() { self.msg = "no other occurrence".into(); }
+            }
+            Action::UndoCursor => {
+                let ok = self.buf().drop_newest_cursor();
+                let n = self.buf().cursors.len();
+                if !ok { self.msg = "only one cursor".into(); } else if n == 1 { self.msg = "back to one cursor".into(); }
+            }
+            Action::SplitLines => {
+                let n = self.buf().cursors_at_line_ends();
+                self.msg = if n == 0 { "select several lines first".into() } else { format!("{n} cursors, one per line") };
+            }
             Action::CursorUp => self.buf().add_cursor_vertical(false),
             Action::CursorDown => self.buf().add_cursor_vertical(true),
-            Action::OneCursor => self.buf().collapse(),
+            Action::OneCursor => { if self.buf().cursors.len() > 1 { self.msg = "back to one cursor".into(); } self.buf().collapse() }
             Action::Language => self.picker = Some(Picker { kind: PickerKind::Language, filter: String::new(), items: { let mut n = self.hl.language_names(); n.sort_by_key(|s| s.to_lowercase()); n.dedup(); n }, sel: 0 }),
             Action::Palette => self.picker = Some(Picker { kind: PickerKind::Palette, filter: String::new(), items: PALETTE.iter().map(|p| p.0.to_string()).collect(), sel: 0 }),
             Action::SaveSession => self.prompt = Some(Prompt { kind: PromptKind::SaveSession, label: "Save session as:".into(), input: String::new(), aux: String::new() }),
@@ -467,6 +493,14 @@ impl App {
         if t.is_empty() { self.msg = "nothing to paste".into(); return; }
         let b = self.buf();
         let n = b.cursors.len();
+        if n > 1 && self.clip_parts.len() == n && self.clip_parts.join("\n") == t {
+            let parts = std::mem::take(&mut self.clip_parts);
+            self.buf().paste_parts(&parts);
+            self.clip_parts = parts;
+            self.msg = format!("pasted {n} pieces, one per cursor");
+            return;
+        }
+        let b = self.buf();
         let spread = b.paste(t);
         self.msg = if spread { format!("pasted {} lines, one per cursor", n) } else if n > 1 { format!("pasted {} at {n} cursors", amount(t)) } else { format!("pasted {}", amount(t)) };
     }
@@ -989,8 +1023,12 @@ mod msg_tests {
         a.buf().collapse();
         a.buf().cursors = vec![crate::buffer::Cursor::at(2), crate::buffer::Cursor::at(5)];
         a.run(Action::Paste);
-        assert_eq!(a.msg, "pasted 2 lines, one per cursor");
+        assert_eq!(a.msg, "pasted 2 pieces, one per cursor");
         assert_eq!(a.buf().contents(), "aaaa bbcc cc");
+        // text that did not come from this editor is still spread by lines
+        a.buf().cursors = vec![crate::buffer::Cursor::at(0), crate::buffer::Cursor::at(1)];
+        a.paste("x\ny");
+        assert_eq!(a.msg, "pasted 2 lines, one per cursor");
     }
 
     #[test]
@@ -1048,5 +1086,50 @@ mod msg_tests {
         assert_eq!(a.msg, "pasted 2 lines");
         a.on_paste("");
         assert_eq!(a.msg, "nothing to paste");
+    }
+
+    fn key(a: &mut App, code: KeyCode, m: KeyModifiers) { a.on_key(KeyEvent::new(code, m)); }
+
+    #[test]
+    fn multicursor_commands_report_and_work_from_the_keyboard() {
+        let mut a = app("foo bar foo baz foo");
+        key(&mut a, KeyCode::Char('d'), KeyModifiers::CONTROL);          // the word
+        key(&mut a, KeyCode::Char('d'), KeyModifiers::CONTROL);
+        assert_eq!(a.buf().cursors.len(), 2);
+        key(&mut a, KeyCode::Char('s'), KeyModifiers::ALT);              // skip the second, take the third
+        assert_eq!((a.buf().cursors.len(), a.buf().primary().start()), (2, 16));
+        key(&mut a, KeyCode::Char('u'), KeyModifiers::CONTROL);
+        assert_eq!(a.msg, "back to one cursor");
+        key(&mut a, KeyCode::Char('a'), KeyModifiers::ALT);
+        assert_eq!(a.msg, "3 occurrences selected");
+        key(&mut a, KeyCode::Char('x'), KeyModifiers::NONE);
+        assert_eq!(a.buf().contents(), "x bar x baz x");
+        key(&mut a, KeyCode::Esc, KeyModifiers::NONE);
+        assert_eq!(a.msg, "back to one cursor");
+        assert_eq!(a.buf().cursors.len(), 1);
+    }
+
+    #[test]
+    fn split_selected_lines_and_the_hint_line_for_cursors() {
+        let mut a = app("a\nb\nc");
+        key(&mut a, KeyCode::Char('l'), KeyModifiers::ALT);
+        assert_eq!(a.msg, "select several lines first");
+        sel(&mut a, 0, 5);
+        key(&mut a, KeyCode::Char('l'), KeyModifiers::ALT);
+        assert_eq!(a.msg, "3 cursors, one per line");
+        let h = crate::keys::hints(&crate::keys::Ctx::Edit { cursors: 3, selected: false }, &a.keymap);
+        assert!(h.iter().any(|(k, d)| k == "Alt-S" && d == "skip"), "{h:?}");
+    }
+
+    #[test]
+    fn each_cursor_gets_its_own_piece_back() {
+        let mut a = app("ab\ncd\n12\n34");
+        a.buf().cursors = vec![crate::buffer::Cursor { head: 2, anchor: 0, want: None }, crate::buffer::Cursor { head: 5, anchor: 3, want: None }];
+        a.run(Action::Copy);
+        assert_eq!(a.msg, "copied 2 selections");
+        a.buf().cursors = vec![crate::buffer::Cursor::at(6), crate::buffer::Cursor::at(9)];
+        a.run(Action::Paste);
+        assert_eq!(a.msg, "pasted 2 pieces, one per cursor");
+        assert_eq!(a.buf().contents(), "ab\ncd\nab12\ncd34");
     }
 }

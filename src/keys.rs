@@ -46,6 +46,10 @@ pub const KEYS: &[Bind] = &[
     b("f2", Define, "define", "Explain the word under the caret", "Search"),
 
     b("ctrl-d", NextOccurrence, "next match", "Select the word, then the next match as a cursor", "Cursors"),
+    b("alt-a", SelectOccurrences, "all matches", "Select every occurrence of the selection (or word)", "Cursors"),
+    b("alt-s", SkipOccurrence, "skip", "Skip this occurrence, take the next", "Cursors"),
+    b("ctrl-u", UndoCursor, "undo cursor", "Drop the newest cursor", "Cursors"),
+    b("alt-l", SplitLines, "split lines", "Cursor at the end of each selected line", "Cursors"),
     b("alt-up", CursorUp, "cursor up", "Add a cursor above", "Cursors"),
     b("alt-down", CursorDown, "cursor down", "Add a cursor below", "Cursors"),
     b("esc", OneCursor, "one cursor", "Back to one cursor, drop the selection", "Cursors"),
@@ -134,10 +138,10 @@ pub fn hints(ctx: &Ctx, m: &HashMap<String, Action>) -> Vec<(String, String)> {
         Ctx::Prompt => lit(&[("Enter", "ok"), ("Esc", "cancel")]),
         Ctx::Edit { cursors, .. } if *cursors > 1 => {
             let mut v = vec![("Esc".to_string(), "one cursor".to_string()), ("type".to_string(), format!("edits all {cursors}"))];
-            v.extend(of(&[NextOccurrence, CursorUp, CursorDown, Copy, Paste, Undo]));
+            v.extend(of(&[NextOccurrence, SkipOccurrence, UndoCursor, CursorUp, Paste]));
             v
         }
-        Ctx::Edit { selected: true, .. } => of(&[Copy, Cut, NextOccurrence, Indent, Find, OneCursor]),
+        Ctx::Edit { selected: true, .. } => of(&[Copy, Cut, NextOccurrence, SelectOccurrences, Indent, Find, OneCursor]),
         Ctx::Edit { .. } => of(&[Help, Save, Find, Undo, NextOccurrence, Palette, Quit]),
     }
 }
