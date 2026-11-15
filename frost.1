@@ -10,6 +10,15 @@ It uses the colours of your terminal. It opens files of several gigabytes at onc
 .PP
 Without arguments frost restores the previous session: open tabs, cursors, unsaved and untitled text, closed tabs and undo history.
 With file arguments it opens only those files and leaves the saved session alone, so it is safe as $EDITOR and $VISUAL (git, nnn, crontab).
+.PP
+When another program changes a file that is open, frost notices within about a second.
+A tab without unsaved edits reloads (undo goes back).
+A tab with unsaved edits is merged line by line with the new text; edits to the same lines are marked with
+.B <<<<<<< yours
+\&...
+.B >>>>>>> disk
+and saving is refused until the markers are gone.
+Files over 4 MB are not followed.
 .SH KEYS
 .TP
 Ctrl-S, Ctrl-Q, Ctrl-O, Ctrl-N, Ctrl-W

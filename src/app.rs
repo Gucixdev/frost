@@ -97,6 +97,7 @@ pub struct App {
     clicks: (Instant, u16, u16, u8),
     confirm_quit: bool,
     pub session_dir: PathBuf,
+    disk_check: Instant,
     pub hl_key: (u64, u64),
     pub closed: Vec<TabState>,
     pub hover_row: Option<usize>,
@@ -146,7 +147,7 @@ impl App {
         let hl = Highlighter::new();
         let mut app = App { tabs: vec![], active: 0, hl, prompt: None, picker: None, menu: None, msg: String::new(), quit: false, line_numbers: true,
                             layout: Layout::default(), show_help: false, last_find: String::new(), clip: String::new(), dragging: false, wheel_at: None, wheel_streak: 0, follow_sig: (usize::MAX, 0, 0),
-                            clicks: (Instant::now(), 0, 0, 0), confirm_quit: false, session_dir: session::session_dir(), hl_key: (0, 0), closed: vec![], hover_row: None, keymap: Default::default(), dict: crate::dict::Dict::load(None), word_idx: Vec::new(), last_word: String::new(), persist: true, hist_written: Default::default() };
+                            clicks: (Instant::now(), 0, 0, 0), confirm_quit: false, session_dir: session::session_dir(), hl_key: (0, 0), closed: vec![], hover_row: None, keymap: Default::default(), dict: crate::dict::Dict::load(None), word_idx: Vec::new(), last_word: String::new(), persist: true, hist_written: Default::default(), disk_check: Instant::now() };
         app.line_numbers = cfg.line_numbers;
         app.keymap = cfg.keys.iter().filter_map(|(k, v)| action_by_name(v).map(|a| (k.clone(), a))).collect();
         if cfg.dictionary.is_some() { app.dict = crate::dict::Dict::load(cfg.dictionary.clone()); }
@@ -248,6 +249,11 @@ impl App {
     pub fn tick(&mut self) -> bool {
         let mut busy = false;
         for t in &mut self.tabs { t.poll_load(); busy |= t.loading.is_some(); }
+        // files changed by something else: one stat per tab per second
+        if self.disk_check.elapsed() >= Duration::from_secs(1) {
+            self.disk_check = Instant::now();
+            for t in &mut self.tabs { if let Some(m) = t.sync_disk() { self.msg = m; } }
+        }
         busy
     }
 

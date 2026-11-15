@@ -200,7 +200,7 @@ impl Buffer {
         self.sync_disk();
         if self.conflict {
             if self.has_conflict_marker() {
-                return Err(std::io::Error::new(std::io::ErrorKind::Other, format!("merge conflicts with the file on disk: resolve the {MARK} markers, then save")));
+                return Err(std::io::Error::other(format!("merge conflicts with the file on disk: resolve the {MARK} markers, then save")));
             }
             self.conflict = false;
         }
