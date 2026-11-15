@@ -3,7 +3,8 @@
 A small terminal text editor in Rust. Layout like [Fresh](https://github.com/sinelaw/fresh) (menu bar, tabs, gutter, status bar, command palette), keys like micro,
 CUA clipboard, mouse, multi-cursor, and Notepad++-style sessions. About 2000 lines, 4 real dependencies.
 
-    make && sudo make install     # or: ./run  (builds and starts)
+    ./install                     # builds and installs to ~/.local/bin (PREFIX=/usr/local with sudo for system-wide)
+    ./run                         # or: build and start without installing
     frost                         # reopen the last session
     frost FILE[:LINE]...          # editor call (git, nnn, $EDITOR): only these files, saved session untouched
     export EDITOR=frost VISUAL=frost

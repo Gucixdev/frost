@@ -1,0 +1,22 @@
+#!/usr/bin/env bash
+# install - build frost (release) and install it for the current user: no arguments, no root.
+# Binary to ~/.local/bin, man page to ~/.local/share/man/man1, licence to ~/.local/share/licenses/frost.
+# PREFIX=/usr/local (and sudo) installs system-wide instead; DESTDIR is honoured for packagers.
+# The dictionary is compiled into the binary, so nothing else is needed at run time.
+set -eu
+cd "$(dirname "$(readlink -f "$0")")"
+[ $# -eq 0 ] || { echo "install: takes no arguments (PREFIX=... in the environment changes the target)" >&2; exit 2; }
+command -v cargo > /dev/null || { echo "install: cargo not found (install Rust: https://rustup.rs)" >&2; exit 1; }
+prefix=${PREFIX:-$HOME/.local}
+dest=${DESTDIR:-}$prefix
+
+cargo build --release --locked --quiet
+install -Dm755 target/release/frost "$dest/bin/frost"
+install -Dm644 frost.1 "$dest/share/man/man1/frost.1"
+install -Dm644 LICENSE "$dest/share/licenses/frost/LICENSE"
+echo "frost installed in $dest/bin/frost (man frost: $dest/share/man/man1)"
+
+case ":$PATH:" in
+	*":$dest/bin:"*) ;;
+	*) [ -n "${DESTDIR:-}" ] || echo "note: $dest/bin is not in PATH; add it to your shell profile" ;;
+esac
