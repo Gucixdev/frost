@@ -230,20 +230,28 @@ impl Buffer {
             }
             self.conflict = false;
         }
-        let tmp = p.with_extension("frost-tmp");
-        {
+        // write through a symlink (dotfiles) instead of replacing it, and next to the real file so the rename stays on one filesystem
+        let target = std::fs::canonicalize(&p).unwrap_or_else(|_| p.clone());
+        let mut tmp_name = target.file_name().map(|n| n.to_os_string()).unwrap_or_default();
+        tmp_name.push(".frost-tmp");
+        let tmp = target.with_file_name(tmp_name);
+        let write = |text: &Rope, crlf: bool| -> std::io::Result<()> {
             let mut w = std::io::BufWriter::with_capacity(1 << 20, std::fs::File::create(&tmp)?);
-            for chunk in self.text.chunks() {
-                if self.crlf {
+            for chunk in text.chunks() {
+                if crlf {
                     let mut it = chunk.split('\n');
                     if let Some(first) = it.next() { w.write_all(first.as_bytes())?; }
                     for part in it { w.write_all(b"\r\n")?; w.write_all(part.as_bytes())?; }
                 } else { w.write_all(chunk.as_bytes())?; }
             }
             w.flush()?;
-        }
+            // the new file takes the place of the old one: keep its mode (an executable script stays executable)
+            if let Ok(m) = std::fs::metadata(&target) { let _ = std::fs::set_permissions(&tmp, m.permissions()); }
+            Ok(())
+        };
+        if let Err(e) = write(&self.text, self.crlf) { let _ = std::fs::remove_file(&tmp); return Err(e); }
         let sig = if self.text.len_chars() as u64 <= SYNC_MAX { stat_sig(&tmp) } else { None };
-        std::fs::rename(&tmp, &p)?;
+        if let Err(e) = std::fs::rename(&tmp, &target) { let _ = std::fs::remove_file(&tmp); return Err(e); }
         self.modified = false;
         match sig {
             Some(sig) => { let t = self.text.to_string(); self.track(sig, t); }
@@ -1303,6 +1311,27 @@ mod sync_tests {
         assert!(b.loading.is_some());
         write_disk(&p, "b\n", 1);
         assert_eq!(b.sync_disk(), None);
+        let _ = std::fs::remove_dir_all(&d);
+    }
+    /// saving must not turn a script into a non-executable file or replace a symlink by a copy
+    #[cfg(unix)]
+    #[test]
+    fn save_keeps_the_mode_and_writes_through_a_symlink() {
+        use std::os::unix::fs::PermissionsExt;
+        let d = dir("mode");
+        let real = d.join("real.sh");
+        std::fs::write(&real, "#!/bin/sh\n").unwrap();
+        std::fs::set_permissions(&real, std::fs::Permissions::from_mode(0o750)).unwrap();
+        let link = d.join("link.sh");
+        std::os::unix::fs::symlink(&real, &link).unwrap();
+        let mut b = Buffer::open(&link).unwrap();
+        b.insert("# x\n");
+        b.save().unwrap();
+        assert!(std::fs::symlink_metadata(&link).unwrap().file_type().is_symlink(), "the link was replaced by a file");
+        assert_eq!(std::fs::read_to_string(&real).unwrap(), "# x\n#!/bin/sh\n");
+        assert_eq!(std::fs::metadata(&real).unwrap().permissions().mode() & 0o777, 0o750);
+        assert_eq!(b.sync_disk(), None);
+        assert!(!b.modified);
         let _ = std::fs::remove_dir_all(&d);
     }
 }
