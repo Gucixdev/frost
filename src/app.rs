@@ -875,7 +875,17 @@ impl App {
                     match self.tab_from_state(&t) { Some(b) => { self.tabs.push(b); self.active = self.tabs.len() - 1; } None => self.msg = "that file is gone".into() }
                 }
             }
-            PickerKind::Sessions => if let Some(s) = session::load_named(&self.session_dir, item) { self.tabs.clear(); self.restore(&s); if self.tabs.is_empty() { self.new_tab(); } },
+            PickerKind::Sessions => if let Some(s) = session::load_named(&self.session_dir, item) {
+                // text that exists only in a tab (unsaved edits, untitled tabs) goes to the closed tabs, where Ctrl-T finds it
+                let hl = &self.hl;
+                let unsaved: Vec<TabState> = self.tabs.iter().filter(|b| b.title.is_none() && (b.modified || (b.path.is_none() && b.len() > 0))).map(|b| Self::tab_state(hl, b)).collect();
+                self.tabs.clear();
+                self.restore(&s);
+                self.closed.extend(unsaved);
+                let over = self.closed.len().saturating_sub(30);
+                self.closed.drain(..over);
+                if self.tabs.is_empty() { self.new_tab(); }
+            },
         }
     }
 
@@ -1354,5 +1364,20 @@ mod msg_tests {
         assert!(a.msg.contains("not saved"), "{}", a.msg);
         assert_eq!(a.keymap["alt-j"], Action::Tab2, "still bound for this run");
         let _ = std::fs::remove_file(&bad);
+    }
+    #[test]
+    fn loading_a_named_session_keeps_unsaved_tabs_reachable() {
+        let dir = std::env::temp_dir().join(format!("frost-named-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let mut a = App::blank();
+        a.session_dir = dir.clone();
+        a.tabs[0] = Buffer::from_text("a draft that is saved nowhere", None);
+        let other = Session { tabs: vec![TabState { unsaved: Some("from the session".into()), ..Default::default() }], active: 0, closed: vec![] };
+        session::save_named(&dir, "work", &other).unwrap();
+        a.picked(PickerKind::Sessions, "work");
+        assert_eq!(a.tabs.len(), 1);
+        assert_eq!(a.buf().contents(), "from the session");
+        assert!(a.closed.iter().any(|c| c.unsaved.as_deref() == Some("a draft that is saved nowhere")), "the unsaved tab is gone for good");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
