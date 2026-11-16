@@ -306,9 +306,9 @@ impl App {
         busy
     }
 
-    /// `full` also writes the undo history (on exit); the 30 s autosave leaves it out because computing it costs time
-    /// Write the undo history of every tab whose history changed. The 30 s autosave does it for texts up to 256 KB (so a
-    /// power cut loses at most 30 s); the final save on exit does it for all (up to 4 MB). Histories nobody refers to are deleted.
+    /// `full` also writes the undo history (on exit); the 7 s autosave leaves it out because computing it costs time
+    /// Write the undo history of every tab whose history changed. The 7 s autosave does it for texts up to 256 KB (so a
+    /// power cut loses at most 7 s); the final save on exit does it for all (up to 4 MB). Histories nobody refers to are deleted.
     fn write_histories(&mut self, full: bool) {
         let limit = if full { 4 << 20 } else { 256 << 10 };
         for b in &self.tabs {
