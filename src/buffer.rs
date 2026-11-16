@@ -110,6 +110,8 @@ pub struct Buffer {
     scan_cache: Option<(u64, std::sync::Arc<crate::lang::Scan>)>,
     /// a refusal the app should tell the user about (strict brackets)
     pub notice: Option<String>,
+    /// a big file whose background load hit a read error: the text is incomplete and must never be saved over the file
+    pub partial: bool,
 }
 
 /// files up to this many bytes follow the disk live (kept in memory a second time as the merge base)
@@ -139,7 +141,7 @@ impl Buffer {
     pub fn new() -> Self {
         let mut b = Buffer { text: Rope::new(), path: None, modified: false, crlf: false, cursors: vec![Cursor::at(0)], syntax: 0, scroll: 0, hscroll: 0,
                  undo: vec![], redo: vec![], last_kind: "", version: 0, first_changed: usize::MAX, loading: None, title: None, hid: String::new(), hist_gen: 0,
-                 base: String::new(), disk_sig: None, synced_path: None, conflict: false, lang: Default::default(), scan_cache: None, notice: None,
+                 base: String::new(), disk_sig: None, synced_path: None, conflict: false, lang: Default::default(), scan_cache: None, notice: None, partial: false,
                  id: { static N: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1); N.fetch_add(1, std::sync::atomic::Ordering::Relaxed) } };
         b.hid = format!("{:x}{:x}", std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_nanos()).unwrap_or(0), b.id);
         b
@@ -222,6 +224,7 @@ impl Buffer {
         use std::io::Write;
         self.ensure_loaded();
         let p = self.path.clone().ok_or_else(|| std::io::Error::other("no file name"))?;
+        if self.partial { return Err(std::io::Error::other("the file was not read completely (read error while loading): saving would cut it short")); }
         // whatever changed on disk since the last sync is merged in first, so this save cannot overwrite it
         self.sync_disk();
         if self.conflict {
@@ -908,10 +911,16 @@ const HEAD: usize = 2 << 20;
 /// each worker reads its share in pieces of this size, so memory use is the text itself plus a little
 const SUB: usize = 16 << 20;
 
+impl Loader {
+    fn complete(&self) -> bool { self.done.load(std::sync::atomic::Ordering::Relaxed) >= self.size }
+}
+
 pub struct Loader {
     rx: std::sync::mpsc::Receiver<(Rope, bool)>,
     done: std::sync::Arc<std::sync::atomic::AtomicU64>,
     total: u64,
+    /// bytes the head and all workers must have read when nothing went wrong
+    size: u64,
 }
 
 #[cfg(unix)]
@@ -1014,7 +1023,7 @@ impl Buffer {
             for (r, c) in parts { rope.append(r); crlf |= c; }
             let _ = tx.send((rope, crlf));
         });
-        b.loading = Some(Loader { rx, done, total: size - cut });
+        b.loading = Some(Loader { rx, done, total: size - cut, size });
         Ok(b)
     }
 
@@ -1027,21 +1036,28 @@ impl Buffer {
 
     /// take the finished tail if it is ready; true when something changed
     pub fn poll_load(&mut self) -> bool {
-        let got = match &self.loading { Some(l) => l.rx.try_recv().ok(), None => None };
-        match got { Some(t) => { self.attach_tail(t); true } None => false }
+        let got = match &self.loading { Some(l) => l.rx.try_recv().ok().map(|t| (t, l.complete())), None => None };
+        match got { Some((t, whole)) => { self.attach_tail(t, whole); true } None => false }
     }
 
     /// wait for the rest of the file (before any edit, save, or jump to the end)
     pub fn ensure_loaded(&mut self) {
-        let got = match &self.loading { Some(l) => l.rx.recv().ok(), None => return };
-        match got { Some(t) => self.attach_tail(t), None => self.loading = None }
+        let got = match &self.loading { Some(l) => l.rx.recv().ok().map(|t| (t, l.complete())), None => return };
+        match got { Some((t, whole)) => self.attach_tail(t, whole), None => { self.loading = None; self.cut_short(); } }
     }
 
-    fn attach_tail(&mut self, (tail, crlf): (Rope, bool)) {
+    fn attach_tail(&mut self, (tail, crlf): (Rope, bool), whole: bool) {
         self.text.append(tail);
         self.crlf |= crlf;
         self.loading = None;
         self.version += 1;
+        if !whole { self.cut_short(); }
+    }
+
+    /// the background load stopped early (read error, file cut while loading, a dead worker): what is here is not the file
+    fn cut_short(&mut self) {
+        self.partial = true;
+        self.notice = Some(format!("{} was not read completely: saving is refused, reopen it", self.name()));
     }
 }
 
@@ -1127,6 +1143,34 @@ mod history_tests {
 #[cfg(test)]
 mod big_tests {
     use super::*;
+    /// a worker that stops at a read error leaves less text than the file has: that text must not be saved over the file
+    #[test]
+    fn a_load_that_stopped_early_refuses_to_save() {
+        let dir = std::env::temp_dir().join(format!("frost-short-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let p = dir.join("big.txt");
+        std::fs::write(&p, "head\ntail\nlost\n").unwrap();
+        for dead_worker in [false, true] {
+            let mut b = Buffer::from_text("head\n", Some(p.clone()));
+            let (tx, rx) = std::sync::mpsc::channel();
+            let done = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(10));   // 10 of 15 bytes arrived
+            b.loading = Some(Loader { rx, done, total: 10, size: 15 });
+            if dead_worker { drop(tx); } else { tx.send((Rope::from_str("tail\n"), false)).unwrap(); }
+            b.ensure_loaded();
+            assert!(b.partial && b.notice.is_some());
+            assert!(b.save().is_err(), "a cut text was written over the file");
+            assert_eq!(std::fs::read_to_string(&p).unwrap(), "head\ntail\nlost\n");
+        }
+        // a complete load saves as before
+        let mut b = Buffer::open_with(&p, 4, 5, 5).unwrap();
+        b.ensure_loaded();
+        assert!(!b.partial);
+        b.save().unwrap();
+        assert_eq!(std::fs::read_to_string(&p).unwrap(), "head\ntail\nlost\n");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     #[test]
     fn lazy_load_matches_plain() {
         let dir = std::env::temp_dir().join(format!("frost-lazy-{}", std::process::id()));
