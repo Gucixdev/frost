@@ -65,10 +65,26 @@ pub fn load_from(dir: &Path) -> Session {
     }
 }
 
+/// a new or emptied file only the user can read: sessions and histories hold unsaved text
+pub fn create_private(path: &Path) -> io::Result<fs::File> {
+    let mut o = fs::OpenOptions::new();
+    o.write(true).create(true).truncate(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+        o.mode(0o600);
+        let f = o.open(path)?;
+        f.set_permissions(fs::Permissions::from_mode(0o600))?;   // a file from an older version keeps its place, not its mode
+        return Ok(f);
+    }
+    #[cfg(not(unix))]
+    o.open(path)
+}
+
 pub fn save_to(dir: &Path, s: &Session) -> io::Result<()> {
     fs::create_dir_all(dir)?;
     let tmp_path = dir.join("session.json.tmp");
-    let mut tmp_file = fs::File::create(&tmp_path)?;
+    let mut tmp_file = create_private(&tmp_path)?;
     tmp_file.write_all(serde_json::to_string(s)?.as_bytes())?;
     tmp_file.flush()?;
     fs::rename(tmp_path, dir.join("session.json"))?;
@@ -104,7 +120,7 @@ pub fn save_named(dir: &Path, name: &str, s: &Session) -> io::Result<()> {
     let sessions_dir = dir.join("sessions");
     fs::create_dir_all(&sessions_dir)?;
     let path = sessions_dir.join(format!("{}.json", name));
-    let mut file = fs::File::create(&path)?;
+    let mut file = create_private(&path)?;
     file.write_all(serde_json::to_string(s)?.as_bytes())?;
     file.flush()?;
     Ok(())
@@ -195,5 +211,21 @@ mod tests {
 
         assert!(save_named(dir.path(), "bad/name", &session).is_err());
         assert!(save_named(dir.path(), "../name", &session).is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn session_and_history_files_are_private() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempdir().unwrap();
+        let s = Session { tabs: vec![TabState { unsaved: Some("a password I typed".into()), ..Default::default() }], active: 0, closed: vec![] };
+        save_to(&dir.0, &s).unwrap();
+        save_named(&dir.0, "n", &s).unwrap();
+        let h = crate::buffer::History { base: "secret".into(), steps: vec![], current: 0 };
+        crate::history_store::save(&dir.0, "abc123", &h).unwrap();
+        for f in ["session.json", "sessions/n.json", "history/abc123.z"] {
+            let mode = fs::metadata(dir.0.join(f)).unwrap().permissions().mode() & 0o777;
+            assert_eq!(mode & 0o077, 0, "{f} is readable by others: {mode:o}");
+        }
     }
 }

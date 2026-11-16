@@ -18,7 +18,7 @@ pub fn save(dir: &Path, id: &str, h: &History) -> std::io::Result<()> {
     let mut enc = flate2::write::ZlibEncoder::new(Vec::new(), flate2::Compression::new(3));
     enc.write_all(&json)?;
     let tmp = p.with_extension("tmp");
-    std::fs::write(&tmp, enc.finish()?)?;
+    crate::session::create_private(&tmp)?.write_all(&enc.finish()?)?;
     std::fs::rename(&tmp, &p)
 }
 
