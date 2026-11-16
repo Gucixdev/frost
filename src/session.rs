@@ -70,15 +70,11 @@ pub fn create_private(path: &Path) -> io::Result<fs::File> {
     let mut o = fs::OpenOptions::new();
     o.write(true).create(true).truncate(true);
     #[cfg(unix)]
-    {
-        use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
-        o.mode(0o600);
-        let f = o.open(path)?;
-        f.set_permissions(fs::Permissions::from_mode(0o600))?;   // a file from an older version keeps its place, not its mode
-        return Ok(f);
-    }
-    #[cfg(not(unix))]
-    o.open(path)
+    std::os::unix::fs::OpenOptionsExt::mode(&mut o, 0o600);
+    let f = o.open(path)?;
+    #[cfg(unix)]
+    f.set_permissions(std::os::unix::fs::PermissionsExt::from_mode(0o600))?;   // a file from an older version keeps its place, not its mode
+    Ok(f)
 }
 
 pub fn save_to(dir: &Path, s: &Session) -> io::Result<()> {
