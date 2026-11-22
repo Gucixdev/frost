@@ -48,21 +48,33 @@ pub fn save(s: &Session) -> io::Result<()> {
     save_to(&session_dir(), s)
 }
 
+/// Read the session. Never fails: a missing file is an empty session, and a file that cannot be read or parsed is moved
+/// aside as `session.json.bad-<unix time>` (see `quarantine`) so the editor starts empty and the next save does not clobber it.
 pub fn load_from(dir: &Path) -> Session {
     let path = dir.join("session.json");
-    let content = match fs::read_to_string(&path) {
-        Ok(content) => content,
-        Err(_) => return Session::default(),
-    };
-
-    match serde_json::from_str(&content) {
-        Ok(session) => session,
-        Err(_) => {
-            let bad_path = dir.join("session.json.bad");
-            fs::rename(&path, bad_path).unwrap_or_default();
-            Session::default()
-        }
+    match fs::read_to_string(&path) {
+        Ok(content) => match serde_json::from_str(&content) {
+            Ok(session) => session,
+            Err(_) => { quarantine(dir); Session::default() }
+        },
+        Err(e) if e.kind() == io::ErrorKind::NotFound => Session::default(),
+        Err(_) => { quarantine(dir); Session::default() }
     }
+}
+
+/// Move `session.json` out of the way as `session.json.bad-<unix time>` (a number is added when that name is taken).
+/// Returns the new path, or None when there was nothing to move or it could not be moved.
+pub fn quarantine(dir: &Path) -> Option<PathBuf> {
+    let path = dir.join("session.json");
+    fs::symlink_metadata(&path).ok()?;
+    let ts = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
+    for n in 0..100 {
+        let name = if n == 0 { format!("session.json.bad-{ts}") } else { format!("session.json.bad-{ts}-{n}") };
+        let to = dir.join(name);
+        if fs::symlink_metadata(&to).is_ok() { continue; }
+        return fs::rename(&path, &to).ok().map(|_| to);
+    }
+    None
 }
 
 /// a new or emptied file only the user can read: sessions and histories hold unsaved text
@@ -174,7 +186,32 @@ mod tests {
 
         let loaded = load_from(dir.path());
         assert_eq!(loaded, Session::default());
-        assert!(dir.path().join("session.json.bad").exists());
+        assert!(!path.exists(), "the bad file is moved away");
+        let bad: Vec<_> = fs::read_dir(dir.path()).unwrap().flatten().filter(|e| e.file_name().to_string_lossy().starts_with("session.json.bad-")).collect();
+        assert_eq!(bad.len(), 1);
+        assert_eq!(fs::read_to_string(bad[0].path()).unwrap(), "corrupt data");
+    }
+
+    #[test]
+    fn an_unreadable_session_is_moved_aside_too() {
+        let dir = tempdir().unwrap();
+        fs::create_dir(dir.path().join("session.json")).unwrap();   // reading a directory fails
+        assert_eq!(load_from(dir.path()), Session::default());
+        assert!(!dir.path().join("session.json").exists());
+        assert!(fs::read_dir(dir.path()).unwrap().flatten().any(|e| e.file_name().to_string_lossy().starts_with("session.json.bad-")));
+        // nothing to move: no panic, no file made up
+        assert_eq!(quarantine(dir.path()), None);
+    }
+
+    #[test]
+    fn quarantine_never_overwrites_an_earlier_bad_file() {
+        let dir = tempdir().unwrap();
+        let mut seen = std::collections::HashSet::new();
+        for i in 0..3 {
+            fs::write(dir.path().join("session.json"), format!("bad {i}")).unwrap();
+            assert!(seen.insert(quarantine(dir.path()).unwrap()));
+        }
+        assert_eq!(seen.len(), 3);
     }
 
     #[test]

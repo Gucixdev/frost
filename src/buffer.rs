@@ -42,7 +42,7 @@ pub fn delta(a: &str, b: &str) -> Delta {
 fn apply(r: &mut Rope, d: &Delta) {
     let n = r.len_chars();
     let s = d.start.min(n);
-    r.remove(s..(s + d.del).min(n));
+    r.remove(s..s.saturating_add(d.del).min(n));
     r.insert(s, &d.ins);
 }
 

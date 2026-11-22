@@ -9,6 +9,7 @@ use ratatui::Frame;
 
 pub fn draw(f: &mut Frame, app: &mut App) {
     let area = f.area();
+    if area.width == 0 || area.height == 0 { return; }   // a window that is not sized yet: nothing to draw, nothing to index
     f.render_widget(Block::default().style(Style::default().bg(crate::config::theme().bg).fg(crate::config::theme().fg)), area);
     let rows = RLayout::vertical([Constraint::Length(1), Constraint::Length(1), Constraint::Min(1), Constraint::Length(1)]).split(area);
     app.layout.menus.clear();

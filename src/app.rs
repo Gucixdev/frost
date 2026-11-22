@@ -172,6 +172,20 @@ fn get_system_clipboard() -> Option<String> {
     None
 }
 
+static QUIET: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+/// true while `guarded` runs: the panic hook then stays silent (the panic is handled, not fatal)
+pub fn quiet_panics() -> bool { QUIET.load(std::sync::atomic::Ordering::SeqCst) > 0 }
+
+/// Run `f`; a panic inside becomes Err(message) instead of taking the editor down. Startup uses it so a damaged session,
+/// history or odd file can only cost that tab, never the start.
+pub fn guarded<T>(f: impl FnOnce() -> T) -> Result<T, String> {
+    use std::sync::atomic::Ordering::SeqCst;
+    QUIET.fetch_add(1, SeqCst);
+    let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(f));
+    QUIET.fetch_sub(1, SeqCst);
+    r.map_err(|e| e.downcast_ref::<&str>().map(|s| s.to_string()).or_else(|| e.downcast_ref::<String>().cloned()).unwrap_or_else(|| "internal error".into()))
+}
+
 impl App {
     /// an app with one empty tab and no config, session or disk access (also what the tests use)
     pub fn blank() -> App {
@@ -198,7 +212,8 @@ impl App {
         // next start, and closing the editor never asks and never loses work. `frost FILE...` (git, nnn, $EDITOR) restores the
         // session too and then opens/activates FILE on top of it. `file:12` and `+12 file` jump to a line.
         app.persist = true;
-        app.restore(&session::load());
+        let saved = session::load();
+        if let Err(why) = guarded(|| app.restore(&saved)) { app.abandon_session(&why); }
         let mut line = 0usize;
         for f in files {
             if let Some(n) = f.strip_prefix('+').and_then(|n| n.parse::<usize>().ok()) { line = n; continue; }
@@ -259,20 +274,33 @@ impl App {
                    history: None, hid: b.hid.clone() }
     }
 
-    fn tab_from_state(&mut self, t: &TabState) -> Option<Buffer> {
+    /// a tab from its saved state, or why it cannot come back. Never panics: a bad file, text or history costs that tab only.
+    fn build_tab(&mut self, t: &TabState) -> Result<Buffer, String> {
         let mut b = match (&t.unsaved, &t.path) {
             (Some(text), p) => { let mut b = Buffer::from_text(text, p.as_ref().map(PathBuf::from)); b.modified = true; b }
-            (None, Some(p)) => Buffer::open(std::path::Path::new(p)).ok()?,
-            (None, None) => return None,
+            (None, Some(p)) => {
+                // opening a FIFO or a device would block the start for ever
+                let meta = std::fs::metadata(p).map_err(|e| e.to_string())?;
+                if !meta.is_file() { return Err("not a regular file".into()); }
+                Buffer::open(std::path::Path::new(p)).map_err(|e| e.to_string())?
+            }
+            (None, None) => return Err(String::new()),
         };
         let first = b.text.line(0).to_string();
         b.syntax = t.syntax.as_deref().and_then(|n| self.hl.index_of(n)).unwrap_or_else(|| self.hl.detect(t.path.as_deref(), &first));
         b.set_cursor_line_col(t.cursor_line, t.cursor_col);
-        b.scroll = t.scroll;
+        b.scroll = if b.loading.is_some() { t.scroll } else { t.scroll.min(b.lines().saturating_sub(1)) };
         if crate::history_store::valid_id(&t.hid) { b.hid = t.hid.clone(); }
         let h = crate::history_store::load(&self.session_dir, &b.hid).or_else(|| t.history.clone());
-        if let Some(h) = h { if b.set_history(&h) { self.hist_written.insert(b.id, b.hist_gen); } }
-        Some(b)
+        if let Some(h) = h {
+            // a damaged history is dropped, the tab stays
+            if let Ok(true) = guarded(|| b.set_history(&h)) { self.hist_written.insert(b.id, b.hist_gen); }
+        }
+        Ok(b)
+    }
+
+    fn tab_from_state(&mut self, t: &TabState) -> Option<Buffer> {
+        guarded(|| self.build_tab(t)).ok()?.ok()
     }
 
     /// remember a tab that is being closed (not an empty untitled one)
@@ -286,12 +314,40 @@ impl App {
         if self.closed.len() > 30 { self.closed.remove(0); }
     }
 
+    /// Bring the saved tabs back. A tab that cannot come back (file gone, unreadable, a directory, a panic while building it)
+    /// is skipped and counted in the status line; the others are not affected.
     pub fn restore(&mut self, s: &Session) {
-        self.closed = s.closed.clone();
+        self.closed = s.closed[s.closed.len().saturating_sub(30)..].to_vec();
+        let mut seen: std::collections::HashSet<String> = self.tabs.iter().map(|b| b.hid.clone()).collect();
+        let mut skipped: Vec<String> = vec![];
         for t in &s.tabs {
-            if let Some(b) = self.tab_from_state(t) { self.tabs.push(b); }
+            let mut t = t.clone();
+            // two tabs sharing a history id would overwrite each other's undo history
+            if !t.hid.is_empty() && !seen.insert(t.hid.clone()) { t.hid.clear(); }
+            match guarded(|| self.build_tab(&t)).and_then(|r| r) {
+                Ok(b) => { seen.insert(b.hid.clone()); self.tabs.push(b); }
+                Err(e) if e.is_empty() => {}
+                Err(e) => skipped.push(format!("{}: {e}", t.path.as_deref().unwrap_or("untitled"))),
+            }
         }
         self.active = s.active.min(self.tabs.len().saturating_sub(1));
+        if let Some(first) = skipped.first() {
+            self.msg = if skipped.len() == 1 { format!("tab not restored, {first}") } else { format!("{} tabs not restored, first {first}", skipped.len()) };
+            self.msg_t = Instant::now();
+        }
+    }
+
+    /// the saved session is not usable at all: start empty and keep the file as `session.json.bad-<time>`
+    fn abandon_session(&mut self, why: &str) {
+        self.tabs.clear();
+        self.closed.clear();
+        self.active = 0;
+        let kept = session::quarantine(&self.session_dir);
+        self.msg = match kept {
+            Some(p) => format!("saved session unusable ({why}), kept as {}", p.file_name().map(|f| f.to_string_lossy().into_owned()).unwrap_or_default()),
+            None => format!("saved session unusable ({why}), started empty"),
+        };
+        self.msg_t = Instant::now();
     }
 
     /// called from the event loop: finish big-file loads; true while any is still running
@@ -337,7 +393,7 @@ impl App {
         if !self.persist { return; }
         self.write_histories(full);
         let s = self.snapshot();
-        if let Err(e) = session::save(&s) { eprintln!("frost: cannot save session: {e}"); }
+        if let Err(e) = session::save(&s) { self.msg = format!("cannot save session: {e}"); self.msg_t = Instant::now(); }
     }
 
     // ---------------------------------------------------------------- clipboard
@@ -1382,5 +1438,152 @@ mod msg_tests {
         assert_eq!(a.buf().contents(), "from the session");
         assert!(a.closed.iter().any(|c| c.unsaved.as_deref() == Some("a draft that is saved nowhere")), "the unsaved tab is gone for good");
         let _ = std::fs::remove_dir_all(&dir);
+    }
+}
+
+/// startup must survive any saved session: a tab that cannot come back is skipped, never fatal
+#[cfg(test)]
+mod startup_tests {
+    use super::*;
+    use crate::buffer::{Delta, History};
+
+    fn dir(tag: &str) -> PathBuf {
+        let d = std::env::temp_dir().join(format!("frost-start-{}-{tag}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        d
+    }
+    fn tab(path: Option<&std::path::Path>) -> TabState { TabState { path: path.map(|p| p.to_string_lossy().into_owned()), ..Default::default() } }
+    fn app_in(d: &std::path::Path) -> App { let mut a = App::blank(); a.session_dir = d.to_path_buf(); a }
+
+    #[test]
+    fn guarded_turns_a_panic_into_an_error() {
+        assert_eq!(guarded(|| 7), Ok(7));
+        let e = guarded(|| -> u8 { panic!("boom") }).unwrap_err();
+        assert!(e.contains("boom"), "{e}");
+    }
+
+    #[test]
+    fn tabs_that_cannot_come_back_are_skipped_with_a_message() {
+        let d = dir("skip");
+        let ok = d.join("ok.txt");
+        std::fs::write(&ok, "fine\n").unwrap();
+        let sub = d.join("adir");
+        std::fs::create_dir(&sub).unwrap();
+        let s = Session { tabs: vec![tab(Some(&d.join("missing.txt"))), tab(Some(&sub)), tab(Some(&ok)), tab(None)], active: 3, closed: vec![] };
+        let mut a = app_in(&d);
+        a.tabs.clear();
+        a.restore(&s);
+        assert_eq!(a.tabs.len(), 1, "only the readable file comes back");
+        assert_eq!(a.tabs[0].contents(), "fine\n");
+        assert_eq!(a.active, 0, "active is clamped");
+        assert!(a.msg.contains("2 tabs not restored"), "{}", a.msg);
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_fifo_tab_does_not_block_the_start() {
+        let d = dir("fifo");
+        let f = d.join("pipe");
+        let c = std::ffi::CString::new(f.to_string_lossy().as_bytes()).unwrap();
+        assert_eq!(unsafe { libc::mkfifo(c.as_ptr(), 0o600) }, 0);
+        let mut a = app_in(&d);
+        a.tabs.clear();
+        a.restore(&Session { tabs: vec![tab(Some(&f))], active: 0, closed: vec![] });   // would hang for ever if it opened the FIFO
+        assert!(a.tabs.is_empty() && a.msg.contains("not a regular file"), "{}", a.msg);
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn odd_cursor_scroll_and_active_are_clamped() {
+        let d = dir("odd");
+        let f = d.join("f.txt");
+        std::fs::write(&f, "a\nb\n").unwrap();
+        let e = d.join("e.txt");
+        std::fs::write(&e, "").unwrap();
+        let big = usize::MAX;
+        let s = Session {
+            tabs: vec![
+                TabState { cursor_line: big, cursor_col: big, scroll: big, ..tab(Some(&f)) },
+                TabState { cursor_line: 9, cursor_col: 9, scroll: 9, ..tab(Some(&e)) },
+                TabState { unsaved: Some("x\ny".into()), cursor_line: big, cursor_col: big, scroll: big, ..Default::default() },
+            ],
+            active: big, closed: vec![],
+        };
+        let mut a = app_in(&d);
+        a.tabs.clear();
+        a.restore(&s);
+        assert_eq!(a.tabs.len(), 3);
+        assert_eq!(a.active, 2);
+        for t in &a.tabs { assert!(t.scroll < t.lines() && t.primary().head <= t.len(), "scroll {} lines {}", t.scroll, t.lines()); }
+        // and the first frame draws them all
+        let mut term = ratatui::Terminal::new(ratatui::backend::TestBackend::new(60, 8)).unwrap();
+        for i in 0..3 { a.active = i; term.draw(|f| crate::ui::draw(f, &mut a)).unwrap(); }
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn a_damaged_history_costs_the_history_not_the_tab() {
+        let d = dir("hist");
+        let f = d.join("f.txt");
+        std::fs::write(&f, "abc\n").unwrap();
+        let huge = History { base: "abc\n".into(), steps: vec![Delta { start: usize::MAX, del: usize::MAX, ins: "x".into() }, Delta { start: 3, del: usize::MAX - 1, ins: "".into() }], current: 2 };
+        crate::history_store::save(&d, "abc1", &huge).unwrap();
+        let s = Session { tabs: vec![TabState { hid: "abc1".into(), ..tab(Some(&f)) }, TabState { history: Some(huge), ..tab(Some(&f)) }], active: 0, closed: vec![] };
+        let mut a = app_in(&d);
+        a.tabs.clear();
+        a.restore(&s);
+        assert_eq!(a.tabs.len(), 2, "{}", a.msg);
+        assert_eq!(a.tabs[0].contents(), "abc\n");
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn tabs_sharing_a_history_id_get_their_own() {
+        let d = dir("dup");
+        let (f, g) = (d.join("f.txt"), d.join("g.txt"));
+        std::fs::write(&f, "f\n").unwrap();
+        std::fs::write(&g, "g\n").unwrap();
+        let s = Session { tabs: vec![TabState { hid: "abc".into(), ..tab(Some(&f)) }, TabState { hid: "abc".into(), ..tab(Some(&g)) }], active: 0, closed: vec![] };
+        let mut a = app_in(&d);
+        a.tabs.clear();
+        a.restore(&s);
+        assert_eq!(a.tabs.len(), 2);
+        assert_ne!(a.tabs[0].hid, a.tabs[1].hid);
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn a_huge_closed_list_is_capped_on_restore() {
+        let closed: Vec<TabState> = (0..5000).map(|i| TabState { unsaved: Some(format!("c{i}")), ..Default::default() }).collect();
+        let mut a = App::blank();
+        a.restore(&Session { tabs: vec![], active: 0, closed });
+        assert_eq!(a.closed.len(), 30);
+        assert_eq!(a.closed.last().unwrap().unsaved.as_deref(), Some("c4999"), "the newest are kept");
+    }
+
+    #[test]
+    fn an_unusable_session_is_set_aside_and_the_editor_starts_empty() {
+        let d = dir("abandon");
+        std::fs::write(d.join("session.json"), "{}").unwrap();
+        let mut a = app_in(&d);
+        a.restore(&Session { tabs: vec![tab(None)], active: 0, closed: vec![TabState::default()] });
+        a.abandon_session("test");
+        assert!(a.tabs.is_empty() && a.closed.is_empty());
+        assert!(a.msg.contains("session.json.bad-"), "{}", a.msg);
+        assert!(!d.join("session.json").exists());
+        assert!(std::fs::read_dir(&d).unwrap().flatten().any(|e| e.file_name().to_string_lossy().starts_with("session.json.bad-")));
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn a_zero_size_window_draws_nothing_and_does_not_panic() {
+        let mut a = App::blank();
+        a.buf().insert("text");
+        for (w, h) in [(120, 0), (0, 40), (0, 0), (1, 1)] {
+            let mut term = ratatui::Terminal::new(ratatui::backend::TestBackend::new(w, h)).unwrap();
+            term.draw(|f| crate::ui::draw(f, &mut a)).unwrap();
+        }
     }
 }

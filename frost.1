@@ -9,6 +9,9 @@ A small editor for the terminal: menu bar and tabs like Fresh, keys like micro (
 It uses the colours of your terminal. It opens files of several gigabytes at once and keeps an unlimited undo history.
 .PP
 Without arguments frost restores the previous session: open tabs, cursors, unsaved and untitled text, closed tabs and undo history.
+A tab that cannot come back is skipped with a message; a session file that cannot be used is moved aside as
+.I session.json.bad-TIME
+and frost starts empty.
 With file arguments it opens only those files and leaves the saved session alone, so it is safe as $EDITOR and $VISUAL (git, nnn, crontab).
 .PP
 When another program changes a file that is open, frost notices within about a second.

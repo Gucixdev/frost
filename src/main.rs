@@ -24,7 +24,11 @@ use std::time::Duration;
 enum Wait { Ready, Timeout, Hup }
 /// wait up to `ms` for input on stdin; reports a hung-up terminal instead of letting crossterm spin on it
 #[cfg(unix)]
+fn stdin_is_tty() -> bool { unsafe { libc::isatty(0) == 1 } }
+#[cfg(unix)]
 fn wait_tty(ms: u64) -> Wait {
+    // stdin is a pipe or /dev/null (a launcher, `cmd | frost`): crossterm reads /dev/tty then, and a closed pipe on fd 0 says nothing about the terminal
+    if !stdin_is_tty() { return if event::poll(Duration::from_millis(ms)).unwrap_or(false) { Wait::Ready } else { Wait::Timeout }; }
     let mut p = libc::pollfd { fd: 0, events: libc::POLLIN, revents: 0 };
     let r = unsafe { libc::poll(&mut p, 1, ms as i32) };
     if r < 0 { return Wait::Timeout; }   // EINTR (a signal): the loop re-checks the stop flag
@@ -37,6 +41,7 @@ fn wait_tty(ms: u64) -> Wait { if event::poll(Duration::from_millis(ms)).unwrap_
 /// true when the terminal on stdin has hung up (crossterm would spin on read()==0 forever, leaving an orphan process)
 #[cfg(unix)]
 fn tty_hung_up() -> bool {
+    if !stdin_is_tty() { return false; }
     let mut p = libc::pollfd { fd: 0, events: 0, revents: 0 };
     unsafe { libc::poll(&mut p, 1, 0) >= 0 && p.revents & (libc::POLLHUP | libc::POLLERR | libc::POLLNVAL) != 0 }
 }
@@ -49,18 +54,29 @@ fn main() -> io::Result<()> {
         println!("frost [FILE...]\n  no files: reopen the last session (open tabs, unsaved text, cursors)\n  F1 keys, F10 menu, Ctrl-P command palette, Ctrl-Q quit (the session is saved on quit)");
         return Ok(());
     }
-    let mut app = app::App::new(&args);
-
-    enable_raw_mode()?;
-    let mut out = io::stdout();
-    execute!(out, EnterAlternateScreen, EnableMouseCapture, EnableBracketedPaste)?;
-    // restore the terminal even when something panics
+    // restore the terminal even when something panics (installed first: App::new reads the saved session, and a panic that
+    // is caught on purpose, see app::guarded, stays silent)
     let hook = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |p| {
+        if app::quiet_panics() { return; }
         let _ = disable_raw_mode();
         let _ = execute!(io::stdout(), DisableBracketedPaste, DisableMouseCapture, LeaveAlternateScreen);
         hook(p);
     }));
+    // a panic while building the app (a file argument, config) must not be the end either: one retry without the saved session
+    let mut app = match app::guarded(|| app::App::new(&args)) {
+        Ok(a) => a,
+        Err(why) => {
+            let kept = session::quarantine(&session::session_dir());
+            let mut a = app::guarded(|| app::App::new(&args)).unwrap_or_else(|_| app::App::blank());
+            a.msg = format!("start failed ({why}), saved session {}", kept.and_then(|p| p.file_name().map(|f| f.to_string_lossy().into_owned())).unwrap_or_else(|| "ignored".into()));
+            a
+        }
+    };
+
+    enable_raw_mode()?;
+    let mut out = io::stdout();
+    execute!(out, EnterAlternateScreen, EnableMouseCapture, EnableBracketedPaste)?;
     let mut term = Terminal::new(CrosstermBackend::new(out))?;
 
     // a shutdown or a closed terminal (SIGTERM/SIGHUP) saves the session and the undo history like a normal quit
@@ -71,11 +87,28 @@ fn main() -> io::Result<()> {
     }
     let mut last_save = std::time::Instant::now();
     let mut last_sig = app.snapshot_sig();
+    let (mut frames, mut size_errors) = (0u32, 0u32);
     let result = (|| -> io::Result<()> {
         while !app.quit && !stop.load(std::sync::atomic::Ordering::Relaxed) {
             // the terminal is gone (closed window, dead ssh, killed multiplexer): quit instead of spinning as an orphan
-            if crossterm::terminal::size().is_err() || tty_hung_up() { break; }
-            term.draw(|f| ui::draw(f, &mut app))?;
+            if tty_hung_up() { break; }
+            // no usable size (0 rows or columns before the window is configured, tput missing): wait, do not draw and do not quit
+            let usable = match crossterm::terminal::size() { Ok((w, h)) => { size_errors = 0; w > 0 && h > 0 } Err(_) => { size_errors += 1; false } };
+            if size_errors > 40 { break; }
+            if usable {
+                frames += 1;
+                if frames <= 5 {
+                    // the first frames draw whatever the saved session restored: a panic there moves the session aside and starts empty
+                    let drawn = app::guarded(|| term.draw(|f| ui::draw(f, &mut app)).map(|_| ()));
+                    if let Ok(Err(e)) = &drawn { return Err(io::Error::new(e.kind(), e.to_string())); }
+                    if let Err(why) = drawn {
+                        let kept = session::quarantine(&session::session_dir());
+                        app = app::guarded(|| app::App::new(&args)).unwrap_or_else(|_| app::App::blank());
+                        app.msg = format!("drawing the saved session failed ({why}), kept as {}", kept.and_then(|p| p.file_name().map(|f| f.to_string_lossy().into_owned())).unwrap_or_else(|| "(not kept)".into()));
+                        last_sig = app.snapshot_sig();
+                    }
+                } else { term.draw(|f| ui::draw(f, &mut app))?; }
+            }
             let busy = app.tick();
             let ms = if busy { 40 } else { 500 };
             // wait on the fd ourselves first: crossterm's poll/read never return once the terminal has hung up
