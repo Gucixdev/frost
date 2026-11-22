@@ -3,6 +3,8 @@
 A small terminal text editor in Rust. Layout like [Fresh](https://github.com/sinelaw/fresh) (menu bar, tabs, gutter, status bar, command palette), keys like micro,
 CUA clipboard, mouse, multi-cursor, and Notepad++-style sessions. About 2000 lines, 4 real dependencies.
 
+![frost: multi-cursor, command palette, key panel](docs/demo.webp)
+
     ./install                     # builds and installs to ~/.local/bin (PREFIX=/usr/local with sudo for system-wide)
     ./run                         # or: ./build (incremental; BUILD_FORCE=1 forces) and start without installing
     ./install -rebuild            # same install after a full rebuild
