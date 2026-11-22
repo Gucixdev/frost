@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# bench - frost benchmarks in a release build: open a 100 MB file, insert at 1000+ cursors, merge3 on a 20 MB file.
+# bench - frost benchmarks in a release build: open a 100 MB file, insert at 1000+ cursors.
 # Prints one "bench ..." line each; fails only on a gross regression. No arguments. Takes about a minute.
 set -eu
 cd "$(dirname "$(readlink -f "$0")")"

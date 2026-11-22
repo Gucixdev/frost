@@ -526,7 +526,10 @@ impl App {
 
     fn save_active(&mut self) {
         if self.buf().path.is_none() { self.run(Action::SaveAs); return; }
-        match self.buf().save() { Ok(()) => { let n = self.buf().name(); self.msg = format!("saved {n}"); } Err(e) => self.msg = format!("save failed: {e}") }
+        match self.buf().save() {
+            Ok(None) => { let n = self.buf().name(); self.msg = format!("saved {n}"); }
+            Ok(Some(p)) => { let n = self.buf().name(); self.msg = format!("{n} changed on disk: yours saved as {} (file untouched)", p.file_name().map(|f| f.to_string_lossy().into_owned()).unwrap_or_default()); }
+            Err(e) => self.msg = format!("save failed: {e}") }
     }
 
     fn close_active(&mut self, _force: bool) {

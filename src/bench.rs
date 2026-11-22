@@ -54,22 +54,3 @@ fn insert_at_1000_cursors() {
     assert!(n >= 1000);
     assert!(ins < Duration::from_secs(2), "{ins:?}");
 }
-
-#[test]
-#[ignore]
-fn merge3_on_a_big_file() {
-    let base = big_text(20);
-    let lines: Vec<&str> = base.split_inclusive('\n').collect();
-    let (mut mine, mut theirs) = (String::new(), String::new());
-    for (i, l) in lines.iter().enumerate() {
-        mine.push_str(if i % 1000 == 0 { "// mine\n" } else { l });
-        theirs.push_str(if i % 1000 == 500 { "// theirs\n" } else { l });
-    }
-    let t = Instant::now();
-    let (m, c) = crate::merge::merge3(&base, &mine, &theirs);
-    let el = t.elapsed();
-    report(&format!("merge3 20 MB, {} lines, {} edits per side", lines.len(), lines.len() / 1000), el);
-    assert_eq!(c, 0);
-    assert!(m.contains("// mine") && m.contains("// theirs"));
-    assert!(el < Duration::from_secs(30), "{el:?}");
-}

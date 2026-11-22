@@ -97,14 +97,14 @@ pub struct Buffer {
     pub hid: String,
     /// bumped whenever the undo/redo history changes
     pub hist_gen: u64,
-    /// the file's text (LF) as of the last sync with the disk: the common ancestor for the merge
+    /// the file's text (LF) as of the last sync with the disk: what a save compares the file with before it overwrites it
     base: String,
     /// (mtime, length) of the file at that sync; None = not tracked (no file, loaded lazily, or too big)
     disk_sig: Option<(SystemTime, u64)>,
     /// the path `base`/`disk_sig` belong to (Save As changes `path`)
     synced_path: Option<PathBuf>,
-    /// a merge left `<<<<<<<` markers in the text: save refuses until they are gone
-    pub conflict: bool,
+    /// the file changed on disk while this tab has unsaved edits: the tab is left alone, a save goes to `NAME.frost-mine`
+    pub disk_changed: bool,
     /// what the language of the tab allows while typing (set by the app from the syntax)
     pub lang: crate::lang::Lang,
     scan_cache: Option<(u64, std::sync::Arc<crate::lang::Scan>)>,
@@ -114,9 +114,8 @@ pub struct Buffer {
     pub partial: bool,
 }
 
-/// files up to this many bytes follow the disk live (kept in memory a second time as the merge base)
+/// files up to this many bytes follow the disk live (kept in memory a second time as the text of the last sync)
 const SYNC_MAX: u64 = 4 << 20;
-const MARK: &str = "<<<<<<< yours";
 
 fn stat_sig(p: &Path) -> Option<(SystemTime, u64)> {
     let m = std::fs::metadata(p).ok()?;
@@ -141,7 +140,7 @@ impl Buffer {
     pub fn new() -> Self {
         let mut b = Buffer { text: Rope::new(), path: None, modified: false, crlf: false, cursors: vec![Cursor::at(0)], syntax: 0, scroll: 0, hscroll: 0,
                  undo: vec![], redo: vec![], last_kind: "", version: 0, first_changed: usize::MAX, loading: None, title: None, hid: String::new(), hist_gen: 0,
-                 base: String::new(), disk_sig: None, synced_path: None, conflict: false, lang: Default::default(), scan_cache: None, notice: None, partial: false,
+                 base: String::new(), disk_sig: None, synced_path: None, disk_changed: false, lang: Default::default(), scan_cache: None, notice: None, partial: false,
                  id: { static N: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1); N.fetch_add(1, std::sync::atomic::Ordering::Relaxed) } };
         b.hid = format!("{:x}{:x}", std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_nanos()).unwrap_or(0), b.id);
         b
@@ -167,12 +166,10 @@ impl Buffer {
         self.disk_sig = None;
         self.base = String::new();
         self.synced_path = None;
-        self.conflict = false;
+        self.disk_changed = false;
     }
 
     fn tracked(&self) -> bool { self.disk_sig.is_some() && self.synced_path == self.path && self.path.is_some() }
-
-    fn has_conflict_marker(&self) -> bool { self.text.lines().any(|l| l.len_chars() >= MARK.len() && l.slice(..MARK.len()) == MARK) }
 
     /// Replace the whole text by `new` as one undo step, keeping the carets where they were.
     fn replace_text(&mut self, new: &str) {
@@ -189,52 +186,51 @@ impl Buffer {
         self.break_undo();
     }
 
-    /// Follow the file on disk. Called about once a second: one stat when nothing changed. A clean tab reloads, a
-    /// tab with unsaved edits is merged three-way (base = text at the last sync), conflicts get markers.
+    /// Follow the file on disk. Called about once a second: one stat when nothing changed. A clean tab reloads; a tab
+    /// with unsaved edits is never touched: it is flagged (`disk_changed`) and the save goes next to the file instead.
     /// Returns a status line when something happened.
     pub fn sync_disk(&mut self) -> Option<String> {
         if self.loading.is_some() || !self.tracked() { return None; }
         let p = self.path.clone()?;
         let sig = stat_sig(&p)?;
         if Some(sig) == self.disk_sig { return None; }
-        // markers from an earlier merge are still in the text: merging into them would nest markers and duplicate
-        // lines. Leave disk_sig and base alone; the change is merged by the first sync after the markers are gone.
-        if self.conflict && self.has_conflict_marker() { return None; }
         let (sig, theirs) = read_synced(&p)?;
         self.disk_sig = Some(sig);
-        if theirs == self.base { return None; }
         let name = self.name();
         if !self.modified {
+            self.disk_changed = false;
+            if theirs == self.base { return None; }
             self.replace_text(&theirs);
             self.modified = false;
             self.base = theirs;
             return Some(format!("{name} reloaded: changed on disk"));
         }
-        let mine = self.text.to_string();
-        let (merged, conflicts) = crate::merge::merge3(&self.base, &mine, &theirs);
-        self.replace_text(&merged);
-        self.base = theirs;
-        self.modified = true;
-        self.conflict |= conflicts > 0;
-        Some(if conflicts > 0 { format!("{name} merged with the file on disk with {conflicts} conflicts: search {MARK}") }
-             else { format!("{name} merged with the file on disk") })
+        // base stays: it is what a save compares the file with
+        let changed = theirs != self.base;
+        let first = changed && !self.disk_changed;
+        self.disk_changed = changed;
+        if first { Some(format!("{name} changed on disk, yours kept")) } else { None }
     }
 
-    pub fn save(&mut self) -> std::io::Result<()> {
+    /// Write the text to the file. When the file changed on disk since the last sync the file is left alone and the text
+    /// goes to `NAME.frost-mine` next to it (the tab stays modified); the returned path says so.
+    pub fn save(&mut self) -> std::io::Result<Option<PathBuf>> {
         use std::io::Write;
         self.ensure_loaded();
         let p = self.path.clone().ok_or_else(|| std::io::Error::other("no file name"))?;
         if self.partial { return Err(std::io::Error::other("the file was not read completely (read error while loading): saving would cut it short")); }
-        // whatever changed on disk since the last sync is merged in first, so this save cannot overwrite it
+        // a clean tab follows the disk first; a dirty one must not overwrite what changed there
         self.sync_disk();
-        if self.conflict {
-            if self.has_conflict_marker() {
-                return Err(std::io::Error::other(format!("merge conflicts with the file on disk: resolve the {MARK} markers, then save")));
-            }
-            self.conflict = false;
-        }
+        let aside = self.tracked() && read_synced(&p).is_some_and(|(_, theirs)| theirs != self.base);
+        if !aside { self.disk_changed = false; }
         // write through a symlink (dotfiles) instead of replacing it, and next to the real file so the rename stays on one filesystem
-        let target = std::fs::canonicalize(&p).unwrap_or_else(|_| p.clone());
+        let mut target = std::fs::canonicalize(&p).unwrap_or_else(|_| p.clone());
+        if aside {
+            let mut n = target.file_name().map(|n| n.to_os_string()).unwrap_or_default();
+            n.push(".frost-mine");
+            target = target.with_file_name(n);
+            self.disk_changed = true;
+        }
         let mut tmp_name = target.file_name().map(|n| n.to_os_string()).unwrap_or_default();
         tmp_name.push(".frost-tmp");
         let tmp = target.with_file_name(tmp_name);
@@ -255,12 +251,13 @@ impl Buffer {
         if let Err(e) = write(&self.text, self.crlf) { let _ = std::fs::remove_file(&tmp); return Err(e); }
         let sig = if self.text.len_chars() as u64 <= SYNC_MAX { stat_sig(&tmp) } else { None };
         if let Err(e) = std::fs::rename(&tmp, &target) { let _ = std::fs::remove_file(&tmp); return Err(e); }
+        if aside { return Ok(Some(target)); }
         self.modified = false;
         match sig {
             Some(sig) => { let t = self.text.to_string(); self.track(sig, t); }
             None => self.untrack(),
         }
-        Ok(())
+        Ok(None)
     }
 
     pub fn contents(&self) -> String { self.text.to_string() }
@@ -1213,86 +1210,62 @@ mod sync_tests {
     const FIVE: &str = "l1\nl2\nl3\nl4\nl5\n";
 
     #[test]
-    fn disjoint_edit_on_disk_merges_and_undo_returns() {
-        let d = dir("merge");
+    fn dirty_tab_is_left_alone_when_the_file_changes() {
+        let d = dir("dirty");
         let p = d.join("f.txt");
         std::fs::write(&p, FIVE).unwrap();
         let mut b = Buffer::open(&p).unwrap();
         assert_eq!(b.sync_disk(), None);
         b.set_cursor_line_col(0, 0);
         b.insert("X");
-        let before = b.contents();
-        assert_eq!(before, "Xl1\nl2\nl3\nl4\nl5\n");
+        let mine = b.contents();
         write_disk(&p, "l1\nl2\nl3\nl4\nL5\n", 1);
         let msg = b.sync_disk().expect("a message");
-        assert!(msg.contains("merged"), "{msg}");
-        assert_eq!(b.contents(), "Xl1\nl2\nl3\nl4\nL5\n");
-        assert!(b.modified && !b.conflict);
-        assert_eq!(b.sync_disk(), None);
-        b.undo();
-        assert_eq!(b.contents(), before);
-        // the caret stayed on its line
-        assert_eq!(b.pos(b.primary().head).0, 0);
-        // saving writes the merged text and tracks the new file
-        b.redo();
-        b.save().unwrap();
-        assert_eq!(std::fs::read_to_string(&p).unwrap(), "Xl1\nl2\nl3\nl4\nL5\n");
-        assert_eq!(b.sync_disk(), None);
+        assert!(msg.contains("changed on disk, yours kept"), "{msg}");
+        assert_eq!(b.contents(), mine, "no merge, no markers");
+        assert!(b.modified && b.disk_changed);
+        assert_eq!(b.sync_disk(), None, "said once");
+        assert!(!b.contents().contains("<<<<<<<"));
         let _ = std::fs::remove_dir_all(&d);
     }
 
     #[test]
-    fn same_line_edited_twice_is_a_conflict_and_save_refuses() {
-        let d = dir("conflict");
+    fn save_after_a_disk_change_goes_next_to_the_file() {
+        let d = dir("aside");
         let p = d.join("f.txt");
         std::fs::write(&p, FIVE).unwrap();
         let mut b = Buffer::open(&p).unwrap();
-        b.set_cursor_line_col(2, 2);
-        b.insert("mine");
+        b.set_cursor_line_col(0, 0);
+        b.insert("X");
         write_disk(&p, "l1\nl2\nTHEIRS\nl4\nl5\n", 1);
-        let msg = b.sync_disk().expect("a message");
-        assert!(msg.contains("1 conflicts") && msg.contains("<<<<<<<"), "{msg}");
-        assert!(b.conflict && b.modified);
-        assert_eq!(b.contents(), "l1\nl2\n<<<<<<< yours\nl3mine\n=======\nTHEIRS\n>>>>>>> disk\nl4\nl5\n");
-        let err = b.save().unwrap_err().to_string();
-        assert!(err.contains("merge conflicts"), "{err}");
-        assert_eq!(std::fs::read_to_string(&p).unwrap(), "l1\nl2\nTHEIRS\nl4\nl5\n", "disk untouched");
-        // resolve: keep one side, drop the markers
-        let all = b.contents();
-        let resolved = all.replace("<<<<<<< yours\nl3mine\n=======\nTHEIRS\n>>>>>>> disk\n", "resolved\n");
-        b.select_all();
-        b.insert(&resolved);
-        b.save().unwrap();
-        assert!(!b.conflict && !b.modified);
-        assert_eq!(std::fs::read_to_string(&p).unwrap(), "l1\nl2\nresolved\nl4\nl5\n");
+        // the timer has not seen it yet: save checks the content itself
+        let aside = b.save().unwrap().expect("saved aside");
+        assert_eq!(aside, std::fs::canonicalize(&d).unwrap().join("f.txt.frost-mine"));
+        assert_eq!(std::fs::read_to_string(&aside).unwrap(), "Xl1\nl2\nl3\nl4\nl5\n");
+        assert_eq!(std::fs::read_to_string(&p).unwrap(), "l1\nl2\nTHEIRS\nl4\nl5\n", "the file on disk is untouched");
+        assert!(b.modified && b.disk_changed);
+        assert!(!d.join("f.txt.frost-tmp").exists() && !d.join("f.txt.frost-mine.frost-tmp").exists());
+        // a second save writes the aside file again, still not the original
+        b.insert("Y");
+        assert!(b.save().unwrap().is_some());
+        assert_eq!(std::fs::read_to_string(&aside).unwrap(), "XYl1\nl2\nl3\nl4\nl5\n");
+        assert_eq!(std::fs::read_to_string(&p).unwrap(), "l1\nl2\nTHEIRS\nl4\nl5\n");
         let _ = std::fs::remove_dir_all(&d);
     }
 
     #[test]
-    fn disk_change_while_conflict_open_does_not_nest_markers() {
-        let d = dir("conflict2");
+    fn save_without_a_disk_change_is_normal_even_when_the_file_was_touched() {
+        let d = dir("plain");
         let p = d.join("f.txt");
         std::fs::write(&p, FIVE).unwrap();
         let mut b = Buffer::open(&p).unwrap();
-        b.set_cursor_line_col(2, 2);
-        b.insert("mine");
-        write_disk(&p, "l1\nl2\nTHEIRS\nl4\nl5\n", 1);
-        b.sync_disk().expect("first merge");
-        let first = b.contents();
-        // the file changes again, touching the conflicted line and another one
-        write_disk(&p, "l1\nl2\nTHEIRS2\nl4\nL5\n", 2);
-        assert!(b.sync_disk().is_none(), "no merge into open markers");
-        assert_eq!(b.contents(), first);
-        assert_eq!(first.matches("<<<<<<< yours").count(), 1);
-        // resolve; the next save merges the second disk change in, once
-        let resolved = first.replace("<<<<<<< yours\nl3mine\n=======\nTHEIRS\n>>>>>>> disk\n", "resolved\n");
-        b.select_all();
-        b.insert(&resolved);
-        let r = b.save();
-        let text = std::fs::read_to_string(&p).unwrap();
-        assert!(r.is_err() || !text.contains("<<<<<<<"), "{r:?} {text}");
-        assert_eq!(b.contents().matches("<<<<<<< yours").count(), if r.is_err() { 1 } else { 0 });
-        assert_eq!(b.contents().matches("L5").count(), 1, "second disk change merged exactly once: {}", b.contents());
+        b.insert("X");
+        write_disk(&p, FIVE, 1); // touched, same text
+        assert_eq!(b.save().unwrap(), None);
+        assert_eq!(std::fs::read_to_string(&p).unwrap(), format!("X{FIVE}"));
+        assert!(!b.modified && !b.disk_changed);
+        assert!(!d.join("f.txt.frost-mine").exists());
+        assert_eq!(b.sync_disk(), None);
         let _ = std::fs::remove_dir_all(&d);
     }
 
@@ -1327,20 +1300,6 @@ mod sync_tests {
         assert!(b.sync_disk().is_some());
         assert_eq!(b.contents(), "a\nB\n");
         assert!(b.crlf);
-        let _ = std::fs::remove_dir_all(&d);
-    }
-
-    #[test]
-    fn save_merges_a_change_the_timer_has_not_seen_yet() {
-        let d = dir("save");
-        let p = d.join("f.txt");
-        std::fs::write(&p, FIVE).unwrap();
-        let mut b = Buffer::open(&p).unwrap();
-        b.set_cursor_line_col(0, 0);
-        b.insert("X");
-        write_disk(&p, "l1\nl2\nl3\nl4\nL5\n", 1);
-        b.save().unwrap();
-        assert_eq!(std::fs::read_to_string(&p).unwrap(), "Xl1\nl2\nl3\nl4\nL5\n");
         let _ = std::fs::remove_dir_all(&d);
     }
 
